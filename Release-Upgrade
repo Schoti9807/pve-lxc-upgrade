@@ -37,7 +37,7 @@
 # RELEASE-UPGRADE-SCRIPT  (Kennung für die Update-Prüfung – nicht entfernen)
 set -uo pipefail
 
-VERSION="1.0.0"
+VERSION="1.3.0"
 REPO_URL="https://github.com/Schoti9807/pve-lxc-upgrade"
 RAW_URL="https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main"
 INSTALL_PATH="/usr/local/sbin/Release-Upgrade"
