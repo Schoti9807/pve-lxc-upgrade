@@ -19,7 +19,7 @@
 #  Docker-Images in den Containern werden NICHT angefasst.
 #  VMs (z. B. Home Assistant) werden nicht berücksichtigt.
 #
-#  Aufruf:  Release-Upgrade
+#  Bedienung:
 #    Beim Start öffnet sich ein Menü, in dem alle Einstellungen gesetzt werden:
 #      Modus                  prüfen + aktualisieren  oder  nur prüfen
 #      Nur diese Container    Auswahl per Häkchen (nichts angehakt = alle)
