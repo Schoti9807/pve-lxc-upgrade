@@ -5,28 +5,39 @@
 Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du dort **Starten** wählst, passiert etwas.
 
 ```
-┌──────────── Release-Upgrade 1.6.0 – proxmox ─────────────┐
-│ 1  Modus ................... prüfen + aktualisieren      │
-│ 2  Nur diese Container ..... alle                        │
-│ 3  Container auslassen ..... keine                       │
-│ 4  Kein Release-Upgrade .... keine                       │
-│ 5  Gestoppte einbeziehen ... nein                        │
-│ 6  Docker-Images ........... nein                        │
-│ H  Hilfe zu den Einstellungen                            │
-│ S  >>> Starten <<<                                       │
-│          <Auswählen>              <Abbrechen>            │
-└──────────────────────────────────────────────────────────┘
+┌───────────── Release-Upgrade 1.7.0 – proxmox ──────────────┐
+│ 1  Modus ...................... prüfen + aktualisieren     │
+│ 2  Container Whitelist ........ alle                       │
+│ 3  Container Blacklist ........ keine                      │
+│ 4  include stopped lxc's? ..... nein                       │
+│ 5  Update Docker-Images? ...... nein                       │
+│ 6  Release-Upgrade (Distri)? .. nein                       │
+│ H  Hilfe zu den Einstellungen                              │
+│ S  >>> Starten <<<                                         │
+│           <Auswählen>               <Abbrechen>            │
+└────────────────────────────────────────────────────────────┘
 ```
+
+Die Punkte 2 und 3 öffnen eine Container-Liste zum Anhaken. Die Punkte 4 bis 6 sind Ja/Nein-Schalter. Sie gelten nur für die Container, die nach Whitelist und Blacklist übrig bleiben.
+
+## Ablauf
+
+1. **Übersicht** aller Container
+2. **Paket-Updates**
+3. **Docker-Images**, wenn Punkt 5 auf „ja“ steht
+4. **Release-Upgrades** ganz am Ende, wenn Punkt 6 auf „ja“ steht
+
+Jeder Schritt wird vorher abgefragt.
 
 ## Funktionen
 
 - **Übersicht** aller Container: installierte Version, Zahl der verfügbaren Paket-Updates, verfügbares neues Release
 - **Paket-Updates** (`apt full-upgrade`) für alle Container oder eine Auswahl
-- **Release-Upgrades**, für jeden Container einzeln bestätigt:
+- **Release-Upgrades (Menüpunkt 6, Standard: aus)**, für jeden Container einzeln bestätigt. Steht der Punkt auf „nein“, zeigt die Übersicht neue Releases nur an:
   - **Debian:** immer nur eine Stufe pro Lauf, z. B. 12 → 13. Vor dem Umstellen sichert das Skript die Paketquellen. Bietet eine Fremdquelle (z. B. das Docker-Repo) das neue Release noch nicht an, setzt es die Quellen automatisch zurück, und am Container ändert sich nichts.
   - **Ubuntu:** über das offizielle `do-release-upgrade`, entsprechend der Einstellung `Prompt=` im Container (LTS oder normal)
   - Danach startet der Container neu, und das Skript prüft, ob die neue Version läuft
-- **Docker-Images (optional, Menüpunkt 6):** Das Skript prüft die laufenden Docker-Container in jedem LXC auf neue Images. Gibt es welche, fragt es je LXC nach, erstellt die betroffenen Dienste mit `docker compose up -d` neu und räumt danach mit `docker image prune -f` alte Images auf. Details unten.
+- **Docker-Images (optional, Menüpunkt 5):** Das Skript prüft die laufenden Docker-Container in jedem LXC auf neue Images. Gibt es welche, fragt es je LXC nach, erstellt die betroffenen Dienste mit `docker compose up -d` neu und räumt danach mit `docker image prune -f` alte Images auf. Details unten.
 - **Dienst-Prüfung vorher/nachher:** laufende systemd-Dienste, Docker-Container und offene TCP-Ports werden verglichen. Fehlende Dienste oder Container kannst du direkt neu starten lassen.
 - **Konfigurationsdateien:** Abfragen wie „deine Version behalten oder ersetzen?“ beantwortet das Skript automatisch mit „behalten“. Die neue Paketversion liegt dann als `*.dpkg-dist` daneben.
 - **Proxmox Backup Server im Container:** Das Skript erkennt ihn, warnt extra, führt `pbs3to4 --full` aus und will eine ausdrückliche Bestätigung
@@ -72,13 +83,13 @@ rm /usr/local/sbin/Release-Upgrade
 > ⚠️ **Ein Release-Upgrade lässt sich nicht einfach rückgängig machen.** Mach vorher ein Backup der Container, zum Beispiel mit dem Proxmox Backup Server oder `vzdump`.
 
 - **Starte das Skript in `tmux` oder `screen`,** wenn du per SSH verbunden bist. Wird ein VPN- oder Reverse-Proxy-Container aktualisiert, über den deine Verbindung läuft, kann die Sitzung abbrechen. Ein laufendes Upgrade würde dann mittendrin abbrechen.
-- **Container mit Herstellersoftware,** die nur bestimmte Releases unterstützt (z. B. UniFi OS Server), solltest du unter **„Kein Release-Upgrade“** anhaken. Paket-Updates bekommen sie trotzdem.
+- **Container mit Herstellersoftware,** die nur bestimmte Releases unterstützt (z. B. UniFi OS Server), schützt du vor einem Release-Upgrade, indem du sie in die **Container Blacklist** (Punkt 3) aufnimmst oder **Release-Upgrade (Distri)?** (Punkt 6) auf „nein“ lässt. Mit der Blacklist bekommen sie auch keine Paket-Updates. Willst du Paket-Updates für sie, mach einen Lauf mit Punkt 6 auf „nein“.
 - **Nach einem Ubuntu-Release-Upgrade** deaktiviert `do-release-upgrade` Fremdquellen wie das Docker-Repo. Das Skript zeigt sie an, wieder aktivieren musst du sie selbst.
 - **Der Proxmox-Host muss das neue Release unterstützen.** Neue Debian- oder Ubuntu-Versionen brauchen in LXC eine ausreichend aktuelle Proxmox-Version.
 
 ## Docker-Images
 
-Ist **6 – Docker-Images** auf „ja“ gestellt, kommt nach den Paket- und Release-Updates ein eigener Abschnitt. Für jeden LXC mit laufenden Docker-Containern gilt:
+Ist **5 – Update Docker-Images?** auf „ja“ gestellt, kommt nach den Paket-Updates und vor den Release-Upgrades ein eigener Abschnitt. Für jeden LXC mit laufenden Docker-Containern gilt:
 
 1. Das Skript lädt für jeden laufenden Container das Image neu (`docker pull`) und vergleicht es mit dem Image, mit dem der Container läuft.
 2. Es zeigt pro Container an, ob es ein neues Image gibt.
