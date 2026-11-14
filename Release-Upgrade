@@ -19,7 +19,7 @@
 #  Docker-Images in den Containern werden NICHT angefasst.
 #  VMs (z. B. Home Assistant) werden nicht berücksichtigt.
 #
-#  Aufruf:  Release-Upgrade
+#  Bedienung:
 #    Beim Start öffnet sich ein Menü, in dem alle Einstellungen gesetzt werden:
 #      Modus                  prüfen + aktualisieren  oder  nur prüfen
 #      Nur diese Container    Auswahl per Häkchen (nichts angehakt = alle)
@@ -28,22 +28,21 @@
 #      Gestoppte einbeziehen  gestoppte Container kurz starten und danach stoppen
 #    Erst mit „Starten“ läuft das Skript los, „Abbrechen“ beendet es sofort.
 #
-#  Start (holt immer die aktuelle Version von GitHub und führt sie aus):
+#  Start (nur so – holt immer die aktuelle Version von GitHub und führt sie aus):
 #    bash -c "$(curl -fsSL https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main/Release-Upgrade)"
-#  Beim ersten Start wird ein kleiner Starter nach /usr/local/sbin/Release-Upgrade
-#  angeboten. Er lädt bei jedem Aufruf ebenfalls die aktuelle Version von GitHub.
-#  Eigene Vorgaben (EXCLUDE, RELEASE_EXCLUDE, …) gehören in /etc/release-upgrade.conf.
+#  Es wird nichts lokal installiert.
+#  Alle Einstellungen werden im Startmenü gesetzt, es gibt keine Konfigurationsdatei.
 #
 #  Log: /var/log/release-upgrade/<Datum>.log
 # =============================================================================
-# RELEASE-UPGRADE-SCRIPT  (Kennung für den Starter – nicht entfernen)
+# RELEASE-UPGRADE-SCRIPT  (Kennung – nicht entfernen)
 set -uo pipefail
 
-VERSION="1.4.0"
+VERSION="1.4.2"
 REPO_URL="https://github.com/Schoti9807/pve-lxc-upgrade"
 RAW_URL="https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main"
-INSTALL_PATH="/usr/local/sbin/Release-Upgrade"   # hier liegt der Starter
-CONF_FILE="/etc/release-upgrade.conf"            # eigene Vorgaben, bleiben über Versionen erhalten
+OLD_INSTALL_PATH="/usr/local/sbin/Release-Upgrade"   # lokaler Start aus Version ≤ 1.4.0 (wird nur gemeldet)
+OLD_CONF_FILE="/etc/release-upgrade.conf"            # Konfigurationsdatei aus Version 1.4.0/1.4.1 (wird nur gemeldet)
 
 # ----------------------------- Einstellungen ---------------------------------
 EXCLUDE=""            # Container komplett auslassen, z. B. "106"
@@ -53,9 +52,6 @@ BOOT_TIMEOUT=180      # Sekunden, die nach einem Neustart auf den Container gewa
 SERVICE_WAIT=90       # Sekunden, die nach einem Update auf fehlende Dienste gewartet wird
 # Kurzlebige Dienste, die beim Vorher/Nachher-Vergleich ignoriert werden (Regex)
 SERVICE_IGNORE='^(apt-daily|apt-daily-upgrade|man-db|packagekit|logrotate|dpkg-db-backup|e2scrub_.*|fstrim|systemd-tmpfiles-clean|phpsessionclean|user@.*|session-.*)\.service$'
-# Eigene Vorgaben aus der Konfigurationsdatei (überschreiben die Werte oben)
-# shellcheck source=/dev/null
-[[ -r $CONF_FILE ]] && . "$CONF_FILE"
 
 # Debian-Releases in Reihenfolge (Upgrade immer nur eine Stufe)
 DEB_ORDER=(stretch buster bullseye bookworm trixie forky duke)
@@ -287,50 +283,27 @@ find /etc -name '*.dpkg-dist' 2>/dev/null | sed 's/^/Neue Paketversion liegt dan
 exit 0
 EOF
 
-# ----------------------------- Starter ---------------------------------------
-# Der Starter unter INSTALL_PATH enthält nicht das Skript selbst, sondern lädt
-# bei jedem Aufruf die aktuelle Version von GitHub und führt sie aus.
-starter_content() {
-  cat <<EOF
-#!/usr/bin/env bash
-# Release-Upgrade – Starter
-# Lädt bei jedem Aufruf die aktuelle Version von GitHub und führt sie aus.
-# Projekt: $REPO_URL
-# RELEASE-UPGRADE-STARTER  (Kennung – nicht entfernen)
-URL="$RAW_URL/Release-Upgrade"
-script=\$(curl -fsSL --max-time 30 "\$URL") \\
-  || { echo "Release-Upgrade: Download von GitHub fehlgeschlagen (\$URL)." >&2; exit 1; }
-script=\${script//\$'\\r'/}
-grep -q '^# RELEASE-UPGRADE-SCRIPT' <<<"\$script" \\
-  || { echo "Release-Upgrade: Die geladene Datei ist kein gültiges Release-Upgrade-Skript." >&2; exit 1; }
-exec bash -c "\$script" Release-Upgrade "\$@"
-EOF
-}
+# ----------------------------- Alter lokaler Start ---------------------------
+# Bis Version 1.4.0 lag unter OLD_INSTALL_PATH ein Starter oder eine Kopie des
+# Skripts, in 1.4.0/1.4.1 gab es OLD_CONF_FILE. Beides wird nicht mehr genutzt
+# und nur gemeldet, aber nicht automatisch gelöscht.
+check_old_install() {
+  local msg=''
+  if [[ -e $OLD_INSTALL_PATH ]] && grep -qE '^# RELEASE-UPGRADE-(SCRIPT|STARTER)' "$OLD_INSTALL_PATH" 2>/dev/null; then
+    msg+="Unter $OLD_INSTALL_PATH liegt noch ein lokaler Start aus einer älteren
+Version. Release-Upgrade wird nur noch direkt über GitHub gestartet:
+  bash -c \"\$(curl -fsSL $RAW_URL/Release-Upgrade)\"
+Entfernen mit:  rm $OLD_INSTALL_PATH
 
-install_starter() {   # beim Start: Starter fehlt oder ist veraltet → anlegen bzw. erneuern
-  local tmp msg
-  tmp=$(mktemp)
-  starter_content >"$tmp"
-  if cmp -s "$tmp" "$INSTALL_PATH"; then rm -f "$tmp"; return 0; fi
-  if grep -q '^# RELEASE-UPGRADE-STARTER' "$INSTALL_PATH" 2>/dev/null; then
-    install -m 0755 "$tmp" "$INSTALL_PATH" 2>/dev/null   # eigener Starter, still erneuern
-    rm -f "$tmp"; return 0
+"
   fi
-  if [[ -e $INSTALL_PATH ]]; then
-    msg="Unter $INSTALL_PATH liegt noch eine fest installierte Kopie des Skripts.\n\nDurch den Starter ersetzen? Er lädt bei jedem Aufruf die aktuelle Version von GitHub.\nEigene Vorgaben bitte nach $CONF_FILE übernehmen."
-  else
-    msg="Starter nach $INSTALL_PATH installieren?\n\nDanach startest du jederzeit einfach mit:  Release-Upgrade\nEs wird dabei immer die aktuelle Version von GitHub geladen."
+  if [[ -e $OLD_CONF_FILE ]]; then
+    msg+="$OLD_CONF_FILE wird nicht mehr gelesen. Einstellungen setzt du
+im Startmenü. Entfernen mit:  rm $OLD_CONF_FILE
+"
   fi
-  if whiptail --title "Release-Upgrade $VERSION – Starter" --yes-button "Installieren" --no-button "Nur starten" \
-       --yesno "$msg" 14 76; then
-    if install -m 0755 "$tmp" "$INSTALL_PATH.new" && mv -f "$INSTALL_PATH.new" "$INSTALL_PATH"; then
-      whiptail --title "Release-Upgrade – Starter" --msgbox \
-        "Starter installiert.\n\nAb jetzt reicht der Befehl:  Release-Upgrade" 10 60
-    else
-      whiptail --msgbox "Installation des Starters fehlgeschlagen." 8 50
-    fi
-  fi
-  rm -f "$tmp"
+  [[ -n $msg ]] || return 0
+  whiptail --title "Release-Upgrade $VERSION – Hinweis" --msgbox "$msg" 18 78
 }
 
 # ----------------------------- Startmenü (whiptail) -------------------------
@@ -401,8 +374,8 @@ Gestoppte einbeziehen
 
 Aktualität
   Das Skript wird bei jedem Start frisch von GitHub geladen, du arbeitest
-  also immer mit der aktuellen Version ($VERSION). Eigene Vorgaben gehören
-  nach $CONF_FILE.
+  also immer mit der aktuellen Version ($VERSION). Lokal wird nichts
+  installiert. Alle Einstellungen setzt du hier im Menü.
   Projekt: $REPO_URL
 
 Vor und nach jedem Update werden Dienste, Docker-Container und Ports
@@ -454,7 +427,7 @@ fi
 
 # Startmenü (immer, sofern ein Terminal da ist)
 if [[ -t 0 && -t 1 ]]; then
-  install_starter
+  check_old_install
   start_menu
   EXCLUDE=$(norm_list "$EXCLUDE"); RELEASE_EXCLUDE=$(norm_list "$RELEASE_EXCLUDE"); ONLY=$(norm_list "$ONLY")
 fi
