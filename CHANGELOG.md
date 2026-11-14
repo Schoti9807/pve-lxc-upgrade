@@ -12,7 +12,7 @@ Versionsschema: VERSION.MAJOR.MINOR (z. B. 1.3.0).
 - Neue Reihenfolge: erst Paket-Updates, dann Docker-Images, Release-Upgrades ganz am Ende
 - Menü neu benannt und sortiert: 2 „Container Whitelist“, 3 „Container Blacklist“, 4 „include stopped lxc's?“, 5 „Update Docker-Images?“, 6 „Release-Upgrade (Distri)?“
 - Release-Upgrades sind jetzt ein Ja/Nein-Schalter (Punkt 6, Standard: nein, Kommandozeile: `-r`). Bei „nein“ zeigt die Übersicht neue Releases nur an.
-- Die Container-Liste „Kein Release-Upgrade“ entfällt. Container wie den UniFi OS Server schützt du per Blacklist oder mit Punkt 6 auf „nein“.
+- Die Container-Liste „Kein Release-Upgrade“ entfällt
 - Die Schalter 4 bis 6 gelten nur für Container, die nach Whitelist und Blacklist übrig bleiben
 
 ## 1.6.0 – 2026-11-14

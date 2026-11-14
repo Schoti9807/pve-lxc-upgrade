@@ -446,8 +446,6 @@ Release-Upgrade (Distri)?
   nächste LTS-Version bzw. laut Prompt= im Container), fragt das Skript
   je Container nach und führt das Upgrade aus. Danach Neustart + Prüfung.
   nein: Neue Releases werden nur in der Übersicht angezeigt.
-  Container mit Herstellersoftware, die nur bestimmte Releases unterstützt
-  (z. B. UniFi OS Server), am besten per Blacklist schützen.
 
 Aktualität
   Das Skript wird bei jedem Start frisch von GitHub geladen, du arbeitest

@@ -83,7 +83,6 @@ rm /usr/local/sbin/Release-Upgrade
 > ⚠️ **Ein Release-Upgrade lässt sich nicht einfach rückgängig machen.** Mach vorher ein Backup der Container, zum Beispiel mit dem Proxmox Backup Server oder `vzdump`.
 
 - **Starte das Skript in `tmux` oder `screen`,** wenn du per SSH verbunden bist. Wird ein VPN- oder Reverse-Proxy-Container aktualisiert, über den deine Verbindung läuft, kann die Sitzung abbrechen. Ein laufendes Upgrade würde dann mittendrin abbrechen.
-- **Container mit Herstellersoftware,** die nur bestimmte Releases unterstützt (z. B. UniFi OS Server), schützt du vor einem Release-Upgrade, indem du sie in die **Container Blacklist** (Punkt 3) aufnimmst oder **Release-Upgrade (Distri)?** (Punkt 6) auf „nein“ lässt. Mit der Blacklist bekommen sie auch keine Paket-Updates. Willst du Paket-Updates für sie, mach einen Lauf mit Punkt 6 auf „nein“.
 - **Nach einem Ubuntu-Release-Upgrade** deaktiviert `do-release-upgrade` Fremdquellen wie das Docker-Repo. Das Skript zeigt sie an, wieder aktivieren musst du sie selbst.
 - **Der Proxmox-Host muss das neue Release unterstützen.** Neue Debian- oder Ubuntu-Versionen brauchen in LXC eine ausreichend aktuelle Proxmox-Version.
 
