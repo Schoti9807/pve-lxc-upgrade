@@ -7,6 +7,15 @@ Versionsschema: VERSION.MAJOR.MINOR (z. B. 1.3.0).
 - **MAJOR:** wird bei jeder Änderung um 1 erhöht, außer es handelt sich um einen Hotfix.
 - **MINOR:** wird bei Hot- und Bugfixes um 1 erhöht.
 
+## 1.5.0 – 2026-11-14
+
+- Neuer Menüpunkt **6 – Docker-Images** (Standard: aus, Kommandozeile: `-d`)
+- Prüft in jedem LXC die laufenden Docker-Container auf ein neues Image
+- Nach einer Abfrage je LXC werden die betroffenen Compose-Dienste mit `docker compose up -d` neu erstellt, danach räumt `docker image prune -f` alte Images auf
+- Container ohne Compose, lokal gebaute und per Digest gepinnte Images werden nur gemeldet
+- Hinweis auf Container mit festem Tag (z. B. `postgres:16`): Sie bekommen nur Updates innerhalb dieses Tags
+- Dienst-Prüfung vorher/nachher auch für Docker-Updates
+
 ## 1.4.2 – 2026-11-14
 
 Hotfix.
