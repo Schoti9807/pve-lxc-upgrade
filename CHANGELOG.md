@@ -7,13 +7,19 @@ Versionsschema: VERSION.MAJOR.MINOR (z. B. 1.3.0).
 - **MAJOR:** wird bei jeder Änderung um 1 erhöht, außer es handelt sich um einen Hotfix.
 - **MINOR:** wird bei Hot- und Bugfixes um 1 erhöht.
 
+## 1.4.2 – 2026-11-14
+
+Hotfix.
+
+- Unterstützung für `/etc/release-upgrade.conf` komplett entfernt: Einstellungen gibt es nur noch über das Startmenü
+- Ist die Datei noch vorhanden, weist das Skript beim Start darauf hin und nennt den Befehl zum Entfernen. Gelöscht wird nichts automatisch.
+
 ## 1.4.1 – 2026-11-14
 
 Hotfix.
 
 - Lokaler Start über `Release-Upgrade` komplett entfernt: Das Skript legt keinen Starter mehr unter `/usr/local/sbin/Release-Upgrade` an und startet nur noch über den GitHub-Befehl
 - Liegt dort noch ein Starter oder eine Kopie aus einer älteren Version, weist das Skript beim Start darauf hin und nennt den Befehl zum Entfernen. Gelöscht wird nichts automatisch.
-- `/etc/release-upgrade.conf` für eigene Vorgaben bleibt unverändert
 
 ## 1.4.0 – 2026-11-14
 

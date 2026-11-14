@@ -5,7 +5,7 @@
 Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du dort **Starten** wählst, passiert etwas.
 
 ```
-┌──────────── Release-Upgrade 1.4.1 – proxmox ─────────────┐
+┌──────────── Release-Upgrade 1.4.2 – proxmox ─────────────┐
 │ 1  Modus ................... prüfen + aktualisieren      │
 │ 2  Nur diese Container ..... alle                        │
 │ 3  Container auslassen ..... keine                       │
@@ -64,35 +64,20 @@ rm /usr/local/sbin/Release-Upgrade
 > ⚠️ **Ein Release-Upgrade lässt sich nicht einfach rückgängig machen.** Mach vorher ein Backup der Container, zum Beispiel mit dem Proxmox Backup Server oder `vzdump`.
 
 - **Starte das Skript in `tmux` oder `screen`,** wenn du per SSH verbunden bist. Wird ein VPN- oder Reverse-Proxy-Container aktualisiert, über den deine Verbindung läuft, kann die Sitzung abbrechen. Ein laufendes Upgrade würde dann mittendrin abbrechen.
-- **Container mit Herstellersoftware,** die nur bestimmte Releases unterstützt (z. B. UniFi OS Server), solltest du unter **„Kein Release-Upgrade“** anhaken. Paket-Updates bekommen sie trotzdem. Alternativ trägst du sie dauerhaft in `/etc/release-upgrade.conf` bei `RELEASE_EXCLUDE="…"` ein.
+- **Container mit Herstellersoftware,** die nur bestimmte Releases unterstützt (z. B. UniFi OS Server), solltest du unter **„Kein Release-Upgrade“** anhaken. Paket-Updates bekommen sie trotzdem.
 - **Nach einem Ubuntu-Release-Upgrade** deaktiviert `do-release-upgrade` Fremdquellen wie das Docker-Repo. Das Skript zeigt sie an, wieder aktivieren musst du sie selbst.
 - **Der Proxmox-Host muss das neue Release unterstützen.** Neue Debian- oder Ubuntu-Versionen brauchen in LXC eine ausreichend aktuelle Proxmox-Version.
 
-## Eigene Vorgaben
+## Einstellungen
 
-Feste Vorgaben, die im Menü vorbelegt sind, trägst du in `/etc/release-upgrade.conf` ein. Die Datei bleibt erhalten, auch wenn auf GitHub eine neue Version erscheint. Beispiel:
-
-```bash
-RELEASE_EXCLUDE="106"   # z. B. UniFi OS Server: nur Paket-Updates
-```
-
-Mögliche Werte:
-
-| Variable | Bedeutung | Standard |
-|---|---|---|
-| `EXCLUDE` | Container immer auslassen, z. B. `"106"` | leer |
-| `RELEASE_EXCLUDE` | Container nur mit Paket-Updates, ohne Release-Upgrade | leer |
-| `BOOT_TIMEOUT` | Sekunden, die nach einem Neustart auf den Container gewartet wird | 180 |
-| `SERVICE_WAIT` | Sekunden, die nach einem Update auf fehlende Dienste gewartet wird | 90 |
-| `SERVICE_IGNORE` | kurzlebige Dienste, die beim Vergleich ignoriert werden (Regex) | apt-daily, man-db, … |
+Alle Einstellungen setzt du bei jedem Start im Menü. Eine Konfigurationsdatei gibt es nicht. Eine `/etc/release-upgrade.conf` aus Version 1.4.0 oder 1.4.1 wird nicht mehr gelesen. Das Skript weist beim Start darauf hin, und du kannst sie mit `rm /etc/release-upgrade.conf` entfernen.
 
 ## Deinstallation
 
-Da nichts installiert wird, gibt es nur die Konfigurationsdatei und die Logs:
+Da nichts installiert wird, bleiben nur die Logs:
 
 ```bash
-rm -f /etc/release-upgrade.conf    # optional: eigene Vorgaben
-rm -r /var/log/release-upgrade     # optional: Logs löschen
+rm -r /var/log/release-upgrade   # optional: Logs löschen
 ```
 
 ## Haftungsausschluss

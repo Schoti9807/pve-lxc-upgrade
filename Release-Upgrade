@@ -31,18 +31,18 @@
 #  Start (nur so – holt immer die aktuelle Version von GitHub und führt sie aus):
 #    bash -c "$(curl -fsSL https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main/Release-Upgrade)"
 #  Es wird nichts lokal installiert.
-#  Eigene Vorgaben (EXCLUDE, RELEASE_EXCLUDE, …) gehören in /etc/release-upgrade.conf.
+#  Alle Einstellungen werden im Startmenü gesetzt, es gibt keine Konfigurationsdatei.
 #
 #  Log: /var/log/release-upgrade/<Datum>.log
 # =============================================================================
 # RELEASE-UPGRADE-SCRIPT  (Kennung – nicht entfernen)
 set -uo pipefail
 
-VERSION="1.4.1"
+VERSION="1.4.2"
 REPO_URL="https://github.com/Schoti9807/pve-lxc-upgrade"
 RAW_URL="https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main"
 OLD_INSTALL_PATH="/usr/local/sbin/Release-Upgrade"   # lokaler Start aus Version ≤ 1.4.0 (wird nur gemeldet)
-CONF_FILE="/etc/release-upgrade.conf"            # eigene Vorgaben, bleiben über Versionen erhalten
+OLD_CONF_FILE="/etc/release-upgrade.conf"            # Konfigurationsdatei aus Version 1.4.0/1.4.1 (wird nur gemeldet)
 
 # ----------------------------- Einstellungen ---------------------------------
 EXCLUDE=""            # Container komplett auslassen, z. B. "106"
@@ -52,9 +52,6 @@ BOOT_TIMEOUT=180      # Sekunden, die nach einem Neustart auf den Container gewa
 SERVICE_WAIT=90       # Sekunden, die nach einem Update auf fehlende Dienste gewartet wird
 # Kurzlebige Dienste, die beim Vorher/Nachher-Vergleich ignoriert werden (Regex)
 SERVICE_IGNORE='^(apt-daily|apt-daily-upgrade|man-db|packagekit|logrotate|dpkg-db-backup|e2scrub_.*|fstrim|systemd-tmpfiles-clean|phpsessionclean|user@.*|session-.*)\.service$'
-# Eigene Vorgaben aus der Konfigurationsdatei (überschreiben die Werte oben)
-# shellcheck source=/dev/null
-[[ -r $CONF_FILE ]] && . "$CONF_FILE"
 
 # Debian-Releases in Reihenfolge (Upgrade immer nur eine Stufe)
 DEB_ORDER=(stretch buster bullseye bookworm trixie forky duke)
@@ -288,19 +285,25 @@ EOF
 
 # ----------------------------- Alter lokaler Start ---------------------------
 # Bis Version 1.4.0 lag unter OLD_INSTALL_PATH ein Starter oder eine Kopie des
-# Skripts. Das Skript startet nur noch über GitHub – eine alte Datei wird
-# gemeldet, aber nicht automatisch gelöscht.
+# Skripts, in 1.4.0/1.4.1 gab es OLD_CONF_FILE. Beides wird nicht mehr genutzt
+# und nur gemeldet, aber nicht automatisch gelöscht.
 check_old_install() {
-  [[ -e $OLD_INSTALL_PATH ]] || return 0
-  grep -qE '^# RELEASE-UPGRADE-(SCRIPT|STARTER)' "$OLD_INSTALL_PATH" 2>/dev/null || return 0
-  whiptail --title "Release-Upgrade $VERSION – Hinweis" --msgbox \
-"Unter $OLD_INSTALL_PATH liegt noch ein lokaler Start aus einer älteren Version.
-
-Release-Upgrade wird nur noch direkt über GitHub gestartet:
+  local msg=''
+  if [[ -e $OLD_INSTALL_PATH ]] && grep -qE '^# RELEASE-UPGRADE-(SCRIPT|STARTER)' "$OLD_INSTALL_PATH" 2>/dev/null; then
+    msg+="Unter $OLD_INSTALL_PATH liegt noch ein lokaler Start aus einer älteren
+Version. Release-Upgrade wird nur noch direkt über GitHub gestartet:
   bash -c \"\$(curl -fsSL $RAW_URL/Release-Upgrade)\"
+Entfernen mit:  rm $OLD_INSTALL_PATH
 
-Die alte Datei wird nicht mehr gebraucht. Entfernen mit:
-  rm $OLD_INSTALL_PATH" 16 78
+"
+  fi
+  if [[ -e $OLD_CONF_FILE ]]; then
+    msg+="$OLD_CONF_FILE wird nicht mehr gelesen. Einstellungen setzt du
+im Startmenü. Entfernen mit:  rm $OLD_CONF_FILE
+"
+  fi
+  [[ -n $msg ]] || return 0
+  whiptail --title "Release-Upgrade $VERSION – Hinweis" --msgbox "$msg" 18 78
 }
 
 # ----------------------------- Startmenü (whiptail) -------------------------
@@ -372,7 +375,7 @@ Gestoppte einbeziehen
 Aktualität
   Das Skript wird bei jedem Start frisch von GitHub geladen, du arbeitest
   also immer mit der aktuellen Version ($VERSION). Lokal wird nichts
-  installiert. Eigene Vorgaben gehören nach $CONF_FILE.
+  installiert. Alle Einstellungen setzt du hier im Menü.
   Projekt: $REPO_URL
 
 Vor und nach jedem Update werden Dienste, Docker-Container und Ports
