@@ -5,13 +5,12 @@
 Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du dort **Starten** wählst, passiert etwas.
 
 ```
-┌──────────── Release-Upgrade 1.3.0 – proxmox ─────────────┐
+┌──────────── Release-Upgrade 1.4.0 – proxmox ─────────────┐
 │ 1  Modus ................... prüfen + aktualisieren      │
 │ 2  Nur diese Container ..... alle                        │
 │ 3  Container auslassen ..... keine                       │
 │ 4  Kein Release-Upgrade .... keine                       │
 │ 5  Gestoppte einbeziehen ... nein                        │
-│ U  Skript aktualisieren (installiert: 1.3.0)             │
 │ H  Hilfe zu den Einstellungen                            │
 │ S  >>> Starten <<<                                       │
 │          <Auswählen>              <Abbrechen>            │
@@ -30,7 +29,7 @@ Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du d
 - **Konfigurationsdateien:** Abfragen wie „deine Version behalten oder ersetzen?“ beantwortet das Skript automatisch mit „behalten“. Die neue Paketversion liegt dann als `*.dpkg-dist` daneben.
 - **Proxmox Backup Server im Container:** Das Skript erkennt ihn, warnt extra, führt `pbs3to4 --full` aus und will eine ausdrückliche Bestätigung
 - **Letztes Backup** des Containers wird vor jedem Release-Upgrade angezeigt
-- **Selbstinstallation** beim ersten Start und **„Skript aktualisieren“** im Menü, mit Anzeige von Changelog und Änderungen
+- **Immer aktuell:** Das Skript wird bei jedem Start direkt von GitHub geladen und ausgeführt, ein eigenes Update ist nicht nötig
 - **Logdatei** für jeden Lauf unter `/var/log/release-upgrade/`
 
 **Was das Skript bewusst nicht macht:** Backups erstellen, Docker-Images aktualisieren und VMs bearbeiten.
@@ -40,40 +39,44 @@ Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du d
 - Proxmox VE (getestet mit 9.x) und Ausführung als `root` auf dem Host
 - LXC-Container mit Debian oder Ubuntu, andere Systeme werden übersprungen
 - Internetzugang vom Host und von den Containern aus
-- `whiptail`, `curl`, `diff` usw. installiert das Skript bei Bedarf selbst
+- `whiptail`, `curl` usw. installiert das Skript bei Bedarf selbst
 
-## Installation
+## Start
 
-In der Shell des Proxmox-Hosts:
+Das Skript wird immer direkt von GitHub geholt und ausgeführt. In der Shell des Proxmox-Hosts:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main/Release-Upgrade)"
 ```
 
-Das Skript fragt, ob es sich nach `/usr/local/sbin/Release-Upgrade` installieren soll. Danach startest du es jederzeit mit:
+Beim ersten Start bietet das Skript an, einen kleinen **Starter** nach `/usr/local/sbin/Release-Upgrade` zu legen. Danach reicht der Befehl:
 
 ```bash
 Release-Upgrade
 ```
 
-## Aktualisieren
+Der Starter enthält nicht das Skript selbst. Er lädt bei jedem Aufruf die aktuelle Version von GitHub und führt sie aus. Du arbeitest also immer mit dem neuesten Stand, ein Menüpunkt zum Aktualisieren ist nicht mehr nötig. Ohne Internetverbindung startet das Skript nicht.
 
-Im Menü **U – Skript aktualisieren** wählen. Das Skript lädt die neueste Version, prüft sie, zeigt den Changelog und die Änderungen an und installiert sie nach deiner Bestätigung. Danach startet das Menü mit der neuen Version neu.
-
-Alternativ kannst du den Installationsbefehl oben einfach noch einmal ausführen.
+Liegt unter `/usr/local/sbin/Release-Upgrade` noch eine fest installierte Kopie aus Version 1.3.0 oder älter, bietet das Skript an, sie durch den Starter zu ersetzen.
 
 ## Wichtige Hinweise
 
 > ⚠️ **Ein Release-Upgrade lässt sich nicht einfach rückgängig machen.** Mach vorher ein Backup der Container, zum Beispiel mit dem Proxmox Backup Server oder `vzdump`.
 
 - **Starte das Skript in `tmux` oder `screen`,** wenn du per SSH verbunden bist. Wird ein VPN- oder Reverse-Proxy-Container aktualisiert, über den deine Verbindung läuft, kann die Sitzung abbrechen. Ein laufendes Upgrade würde dann mittendrin abbrechen.
-- **Container mit Herstellersoftware,** die nur bestimmte Releases unterstützt (z. B. UniFi OS Server), solltest du unter **„Kein Release-Upgrade“** anhaken. Paket-Updates bekommen sie trotzdem. Alternativ trägst du sie dauerhaft oben im Skript bei `RELEASE_EXCLUDE="…"` ein.
+- **Container mit Herstellersoftware,** die nur bestimmte Releases unterstützt (z. B. UniFi OS Server), solltest du unter **„Kein Release-Upgrade“** anhaken. Paket-Updates bekommen sie trotzdem. Alternativ trägst du sie dauerhaft in `/etc/release-upgrade.conf` bei `RELEASE_EXCLUDE="…"` ein.
 - **Nach einem Ubuntu-Release-Upgrade** deaktiviert `do-release-upgrade` Fremdquellen wie das Docker-Repo. Das Skript zeigt sie an, wieder aktivieren musst du sie selbst.
 - **Der Proxmox-Host muss das neue Release unterstützen.** Neue Debian- oder Ubuntu-Versionen brauchen in LXC eine ausreichend aktuelle Proxmox-Version.
 
-## Einstellungen im Skript
+## Eigene Vorgaben
 
-Oben im Skript lassen sich feste Vorgaben setzen, die im Menü vorbelegt sind:
+Feste Vorgaben, die im Menü vorbelegt sind, trägst du in `/etc/release-upgrade.conf` ein. Die Datei bleibt erhalten, auch wenn auf GitHub eine neue Version erscheint. Beispiel:
+
+```bash
+RELEASE_EXCLUDE="106"   # z. B. UniFi OS Server: nur Paket-Updates
+```
+
+Mögliche Werte:
 
 | Variable | Bedeutung | Standard |
 |---|---|---|
@@ -83,12 +86,11 @@ Oben im Skript lassen sich feste Vorgaben setzen, die im Menü vorbelegt sind:
 | `SERVICE_WAIT` | Sekunden, die nach einem Update auf fehlende Dienste gewartet wird | 90 |
 | `SERVICE_IGNORE` | kurzlebige Dienste, die beim Vergleich ignoriert werden (Regex) | apt-daily, man-db, … |
 
-Hinweis: „Skript aktualisieren“ überschreibt diese Werte mit der neuen Version. Notiere dir deine Anpassungen also vorher.
-
 ## Deinstallation
 
 ```bash
-rm /usr/local/sbin/Release-Upgrade
+rm /usr/local/sbin/Release-Upgrade   # Starter
+rm -f /etc/release-upgrade.conf      # optional: eigene Vorgaben
 rm -r /var/log/release-upgrade   # optional: Logs löschen
 ```
 

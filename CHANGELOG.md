@@ -7,6 +7,15 @@ Versionsschema: VERSION.MAJOR.MINOR (z. B. 1.3.0).
 - **MAJOR:** wird bei jeder Änderung um 1 erhöht, außer es handelt sich um einen Hotfix.
 - **MINOR:** wird bei Hot- und Bugfixes um 1 erhöht.
 
+## 1.4.0 – 2026-11-14
+
+- Das Skript wird jetzt immer direkt von GitHub geholt und ausgeführt
+- Statt einer fest installierten Kopie legt das Skript einen Starter nach `/usr/local/sbin/Release-Upgrade`, der bei jedem Aufruf die aktuelle Version lädt. Eine alte Kopie wird auf Nachfrage durch den Starter ersetzt.
+- Menüpunkt „Skript aktualisieren“ und die Selbstaktualisierung entfernt
+- Eigene Vorgaben (`EXCLUDE`, `RELEASE_EXCLUDE`, …) kommen jetzt aus `/etc/release-upgrade.conf`
+- `diffutils` wird nicht mehr als Abhängigkeit benötigt
+- `-h` zeigt die Hilfe jetzt auch beim Start über GitHub an
+
 ## 1.3.0 – 2026-11-14
 
 Erste veröffentlichte Version.
