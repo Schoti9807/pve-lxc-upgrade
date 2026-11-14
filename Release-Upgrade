@@ -10,13 +10,16 @@
 #  Prüft jeden LXC (Debian / Ubuntu) auf
 #    1. Paket-Updates innerhalb der installierten Version (apt full-upgrade)
 #    2. ein neues Distributions-Release (z. B. Debian 12 → 13, Ubuntu 24.04 → 26.04)
+#    3. optional neue Docker-Images für Compose-Container
 #  zeigt eine Übersicht und führt die Updates nach Bestätigung aus:
 #    - Paket-Updates: eine Abfrage für alle (oder Auswahl)
 #    - Release-Upgrades: eine Abfrage je Container, danach Neustart + Prüfung
+#    - Docker-Images (wenn im Menü aktiviert): eine Abfrage je Container,
+#      danach docker compose up -d und docker image prune -f
 #  Vor und nach jedem Update/Upgrade wird verglichen, ob alle Dienste wieder
 #  laufen (systemd-Dienste, Docker-Container, offene TCP-Ports); fehlende
 #  Dienste/Container können direkt neu gestartet werden.
-#  Docker-Images in den Containern werden NICHT angefasst.
+#  Docker-Container, die nicht per Compose laufen, werden nur gemeldet.
 #  VMs (z. B. Home Assistant) werden nicht berücksichtigt.
 #
 #  Bedienung:
@@ -26,6 +29,7 @@
 #      Container auslassen    Auswahl per Häkchen
 #      Kein Release-Upgrade   Container, die nur Paket-Updates bekommen
 #      Gestoppte einbeziehen  gestoppte Container kurz starten und danach stoppen
+#      Docker-Images          neue Images für Compose-Container laden und Container neu erstellen
 #    Erst mit „Starten“ läuft das Skript los, „Abbrechen“ beendet es sofort.
 #
 #  Start (nur so – holt immer die aktuelle Version von GitHub und führt sie aus):
@@ -38,7 +42,7 @@
 # RELEASE-UPGRADE-SCRIPT  (Kennung – nicht entfernen)
 set -uo pipefail
 
-VERSION="1.4.2"
+VERSION="1.5.0"
 REPO_URL="https://github.com/Schoti9807/pve-lxc-upgrade"
 RAW_URL="https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main"
 OLD_INSTALL_PATH="/usr/local/sbin/Release-Upgrade"   # lokaler Start aus Version ≤ 1.4.0 (wird nur gemeldet)
@@ -283,6 +287,54 @@ find /etc -name '*.dpkg-dist' 2>/dev/null | sed 's/^/Neue Paketversion liegt dan
 exit 0
 EOF
 
+# Docker: prüft alle laufenden Docker-Container auf ein neues Image.
+# Ausgabe je Container: STATUS|Name|Image|alte ID|neue ID|Projekt|Dienst|Ordner|Dateien
+#   NEW  neues Image, Compose-Container      RUN  neues Image, kein Compose
+#   OK   aktuell    PIN  per Digest gepinnt    FAIL Image nicht ladbar
+read -r -d '' DOCKER_CHECK_SCRIPT <<'EOF'
+set -uo pipefail
+command -v docker >/dev/null || exit 0
+lbl() { docker inspect -f "{{index .Config.Labels \"$2\"}}" "$1" 2>/dev/null; }
+docker ps --format '{{.Names}}' | while read -r c; do
+  [[ -n $c ]] || continue
+  img=$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null) || continue
+  old=$(docker inspect -f '{{.Image}}' "$c")
+  proj=$(lbl "$c" com.docker.compose.project)
+  svc=$(lbl "$c" com.docker.compose.service)
+  dir=$(lbl "$c" com.docker.compose.project.working_dir)
+  files=$(lbl "$c" com.docker.compose.project.config_files)
+  new=$old
+  if [[ $img == *@sha256:* ]]; then st=PIN
+  elif ! docker pull -q "$img" >/dev/null 2>&1 </dev/null; then st=FAIL
+  else
+    new=$(docker image inspect -f '{{.Id}}' "$img" 2>/dev/null)
+    if [[ $new == "$old" ]]; then st=OK
+    elif [[ -n $proj && -n $svc && -n $dir ]]; then st=NEW
+    else st=RUN; fi
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$st" "$c" "$img" "${old#sha256:}" "${new#sha256:}" \
+    "$proj" "$svc" "$dir" "$files"
+done
+exit 0
+EOF
+
+# Docker: Compose-Dienste mit neuem Image neu erstellen
+# Aufruf: Projekt Ordner Dateien(Komma-getrennt) Dienst…
+read -r -d '' DOCKER_UP_SCRIPT <<'EOF'
+set -uo pipefail
+proj=$1 dir=$2 files=$3; shift 3
+if docker compose version >/dev/null 2>&1; then DC=(docker compose)
+elif command -v docker-compose >/dev/null; then DC=(docker-compose)
+else echo "docker compose nicht gefunden"; exit 10; fi
+cd "$dir" 2>/dev/null || { echo "Projektordner $dir nicht gefunden"; exit 11; }
+args=(-p "$proj")
+IFS=',' read -r -a fl <<<"$files"
+for f in "${fl[@]}"; do [[ -n $f ]] && args+=(-f "$f"); done
+echo "  ${DC[*]} ${args[*]} up -d $*   ($dir)"
+"${DC[@]}" "${args[@]}" up -d "$@" </dev/null || exit 20
+exit 0
+EOF
+
 # ----------------------------- Alter lokaler Start ---------------------------
 # Bis Version 1.4.0 lag unter OLD_INSTALL_PATH ein Starter oder eine Kopie des
 # Skripts, in 1.4.0/1.4.1 gab es OLD_CONF_FILE. Beides wird nicht mehr genutzt
@@ -327,12 +379,13 @@ start_menu() {
   ((${#CT_LINES[@]})) || die "Keine Container gefunden."
   while true; do
     choice=$(whiptail --title "$WT_TITLE" --ok-button "Auswählen" --cancel-button "Abbrechen" \
-      --menu "Einstellungen anpassen und dann Starten wählen.\nEs wird erst etwas geprüft oder installiert, wenn du startest.\n\nBedienung: Pfeiltasten = Punkt wählen, Enter = öffnen/umschalten,\nTab = zu den Schaltflächen, Esc = Abbrechen" 23 76 8 \
+      --menu "Einstellungen anpassen und dann Starten wählen.\nEs wird erst etwas geprüft oder installiert, wenn du startest.\n\nBedienung: Pfeiltasten = Punkt wählen, Enter = öffnen/umschalten,\nTab = zu den Schaltflächen, Esc = Abbrechen" 24 76 9 \
       1 "Modus ................... $( ((CHECK_ONLY)) && echo 'nur prüfen' || echo 'prüfen + aktualisieren')" \
       2 "Nur diese Container ..... ${ONLY:-alle}" \
       3 "Container auslassen ..... ${EXCLUDE:-keine}" \
       4 "Kein Release-Upgrade .... ${RELEASE_EXCLUDE:-keine}" \
       5 "Gestoppte einbeziehen ... $( ((INCLUDE_STOPPED)) && echo ja || echo nein)" \
+      6 "Docker-Images ........... $( ((DOCKER_UPDATES)) && echo ja || echo nein)" \
       H "Hilfe zu den Einstellungen" \
       S ">>> Starten <<<" \
       3>&1 1>&2 2>&3) || { clear; echo "Release-Upgrade abgebrochen – es wurde nichts geändert."; exit 0; }
@@ -342,11 +395,12 @@ start_menu() {
       3) EXCLUDE=$(ct_pick "Diese Container komplett auslassen:" "$EXCLUDE") ;;
       4) RELEASE_EXCLUDE=$(ct_pick "Für diese Container KEIN Release-Upgrade (Paket-Updates laufen trotzdem):" "$RELEASE_EXCLUDE") ;;
       5) INCLUDE_STOPPED=$(( ! INCLUDE_STOPPED )) ;;
+      6) DOCKER_UPDATES=$(( ! DOCKER_UPDATES )) ;;
       H) whiptail --title "$WT_TITLE – Hilfe" --scrolltext --msgbox \
 "Bedienung
   Hauptmenü: Pfeiltasten = Punkt wählen, Enter = öffnen bzw. umschalten,
   Tab = zwischen Liste und Schaltflächen wechseln, Esc = Abbrechen.
-  Punkte 1 und 5 schalten bei Enter direkt um.
+  Punkte 1, 5 und 6 schalten bei Enter direkt um.
   Punkte 2, 3 und 4 öffnen eine Container-Liste: Leertaste = an-/abhaken,
   Enter = übernehmen, Esc oder Zurück = alte Auswahl behalten.
   Mit Starten beginnt die Prüfung, mit Abbrechen wird nichts geändert.
@@ -372,6 +426,18 @@ Gestoppte einbeziehen
   Gestoppte Container werden kurz gestartet, bearbeitet und danach wieder
   gestoppt. Sonst werden sie übersprungen.
 
+Docker-Images
+  Prüft in jedem Container die laufenden Docker-Container auf ein neues
+  Image (docker pull). Gibt es eins, fragt das Skript je Container nach,
+  erstellt die betroffenen Compose-Dienste mit docker compose up -d neu
+  und räumt danach mit docker image prune -f alte Images auf.
+  - Nur Compose-Container werden aktualisiert, andere nur gemeldet.
+  - Images mit festem Tag (z. B. postgres:16) bekommen nur Updates
+    innerhalb dieses Tags, keinen Sprung auf eine neue Hauptversion.
+  - Per Digest (@sha256:…) gepinnte Images werden übersprungen.
+  - Die Prüfung lädt neue Images schon herunter. Im Modus nur prüfen
+    werden Docker-Images deshalb nicht geprüft.
+
 Aktualität
   Das Skript wird bei jedem Start frisch von GitHub geladen, du arbeitest
   also immer mit der aktuellen Version ($VERSION). Lokal wird nichts
@@ -386,13 +452,14 @@ verglichen. Log: $LOG_DIR" 24 78 ;;
 }
 
 # ----------------------------- Optionen --------------------------------------
-CHECK_ONLY=0 ONLY="" INCLUDE_STOPPED=0
+CHECK_ONLY=0 ONLY="" INCLUDE_STOPPED=0 DOCKER_UPDATES=0
 while (($#)); do
   case $1 in
     -c|--check)           CHECK_ONLY=1 ;;
     -t|--ct)              ONLY=$(norm_list "${2:-}"); shift ;;
     -x|--exclude)         EXCLUDE="$EXCLUDE,$(norm_list "${2:-}")"; shift ;;
     -s|--include-stopped) INCLUDE_STOPPED=1 ;;
+    -d|--docker)          DOCKER_UPDATES=1 ;;
     -h|--help)            { [[ -f $0 ]] && grep -q '^# RELEASE-UPGRADE-SCRIPT' "$0" && cat "$0" || printf '%s\n' "${BASH_EXECUTION_STRING:-}"; } \
                             | awk 'NR>2 && /^# =====/{exit} NR>2{sub(/^# ?/, ""); print}'; exit 0 ;;
     *) die "Unbekannte Option: $1 (Hilfe: -h)" ;;
@@ -455,9 +522,10 @@ trap cleanup EXIT
 
 printf '%sRelease-Upgrade %s%s  –  %s  –  Host %s\n' "$B" "$VERSION" "$N" "$(date '+%d.%m.%Y %H:%M')" "$(hostname)"
 printf '%sLog: %s%s\n' "$D" "$LOG" "$N"
-printf '%sEinstellungen: Modus=%s | Nur=%s | Auslassen=%s | Kein Release=%s | Gestoppte=%s%s\n' "$D" \
+printf '%sEinstellungen: Modus=%s | Nur=%s | Auslassen=%s | Kein Release=%s | Gestoppte=%s | Docker=%s%s\n' "$D" \
   "$( ((CHECK_ONLY)) && echo 'nur prüfen' || echo 'prüfen + aktualisieren')" "${ONLY:-alle}" "${EXCLUDE:-keine}" \
-  "${RELEASE_EXCLUDE:-keine}" "$( ((INCLUDE_STOPPED)) && echo ja || echo nein)" "$N"
+  "${RELEASE_EXCLUDE:-keine}" "$( ((INCLUDE_STOPPED)) && echo ja || echo nein)" \
+  "$( ((DOCKER_UPDATES)) && echo ja || echo nein)" "$N"
 
 if [[ -n ${SSH_CONNECTION:-} && -z ${TMUX:-}${STY:-} ]] && (( ! CHECK_ONLY )); then
   warn "Du bist per SSH verbunden und nicht in tmux/screen."
@@ -599,10 +667,11 @@ if ((${#PKG_IDS[@]})); then
 fi
 
 if (( CHECK_ONLY )); then
+  (( DOCKER_UPDATES )) && { echo; echo "  ${D}Docker-Images werden im Modus „nur prüfen“ nicht geprüft (die Prüfung lädt Images herunter).${N}"; }
   echo; ok "Nur geprüft (--check) – nichts installiert."
   exit 0
 fi
-if ((${#PKG_IDS[@]} == 0 && ${#REL_IDS[@]} == 0)); then
+if ((${#PKG_IDS[@]} == 0 && ${#REL_IDS[@]} == 0)) && (( ! DOCKER_UPDATES )); then
   echo; ok "Alle geprüften Container sind aktuell."
   exit 0
 fi
@@ -695,6 +764,67 @@ if ((${#REL_IDS[@]})); then
     RESULT[$id]+="${RESULT[$id]:+, }${G}Release → ${VERTXT[$id]}${N}${SVC_NOTE}"
     [[ ${CODE[$id]} != "$new" ]] && warn "Codename ist '${CODE[$id]}', erwartet '$new' – bitte prüfen."
   done
+fi
+
+# ----------------------------- Docker-Images ---------------------------------
+if (( DOCKER_UPDATES )); then
+  info "Docker-Images"
+  echo "  ${D}Die Prüfung lädt neue Images schon herunter. Container werden erst nach Bestätigung neu erstellt.${N}"
+  DOCKER_FOUND=0
+  for id in "${CTS[@]}"; do
+    [[ -n ${VERTXT[$id]:-} && -n ${PKG_CNT[$id]:-} ]] || continue
+    ct_run "$id" 'command -v docker >/dev/null' || continue
+    echo; printf '%s── CT %s %s: Docker-Images ──%s\n' "$B" "$id" "${NAME[$id]}" "$N"
+    echo "  Suche nach neuen Images …"
+    mapfile -t DLINES < <(ct_script "$id" <<<"$DOCKER_CHECK_SCRIPT")
+    if ((${#DLINES[@]} == 0)); then echo "  ${D}Keine laufenden Docker-Container.${N}"; continue; fi
+    DOCKER_FOUND=1
+    unset PJ_DIR PJ_FILES PJ_SVCS; declare -A PJ_DIR=() PJ_FILES=() PJ_SVCS=()
+    new_cnt=0 run_cnt=0 TAG_HINTS=()
+    for line in "${DLINES[@]}"; do
+      IFS='|' read -r st c img old new proj svc dir files <<<"$line"
+      ref=${img##*/}; tag=latest; [[ $ref == *:* ]] && tag=${ref##*:}
+      [[ $st != PIN && $tag != latest ]] && TAG_HINTS+=("$c ($img)")
+      case $st in
+        OK)   printf '    %-24s %-44s %saktuell%s\n' "$c" "$img" "$G" "$N" ;;
+        NEW)  printf '    %-24s %-44s %s%s → %s%s\n' "$c" "$img" "$Y" "${old:0:12}" "${new:0:12}" "$N"
+              PJ_DIR[$proj]=$dir PJ_FILES[$proj]=$files PJ_SVCS[$proj]+="$svc "; ((new_cnt++)) ;;
+        RUN)  printf '    %-24s %-44s %sneues Image – nicht per Compose gestartet, bitte manuell aktualisieren%s\n' "$c" "$img" "$Y" "$N"
+              ((run_cnt++)) ;;
+        PIN)  printf '    %-24s %-44s %sper Digest gepinnt – übersprungen%s\n' "$c" "${img%%@*}@…" "$D" "$N" ;;
+        FAIL) printf '    %-24s %-44s %sImage nicht ladbar (lokal gebaut oder Registry nicht erreichbar)%s\n' "$c" "$img" "$Y" "$N" ;;
+      esac
+    done
+    if ((${#TAG_HINTS[@]})); then
+      warn "Hinweis: Diese Container nutzen einen festen Tag. Sie bekommen nur Updates innerhalb"
+      warn "dieses Tags, keinen Sprung auf eine neue Hauptversion. Dafür den Tag selbst ändern:"
+      printf '      %s\n' "${TAG_HINTS[@]}"
+    fi
+    (( run_cnt )) && RESULT[$id]+="${RESULT[$id]:+, }${Y}Docker: ${run_cnt} Image(s) manuell aktualisieren${N}"
+    if (( new_cnt == 0 )); then ok "Keine Compose-Container mit neuem Image."; continue; fi
+
+    if ! ask "Docker-Images in CT $id aktualisieren (${new_cnt} Container neu erstellen)?"; then
+      RESULT[$id]+="${RESULT[$id]:+, }${D}Docker übersprungen${N}"; continue
+    fi
+    pre_check "$id"
+    dfail=0
+    for proj in "${!PJ_DIR[@]}"; do
+      read -r -a svcs <<<"${PJ_SVCS[$proj]}"
+      ct_script "$id" "$proj" "${PJ_DIR[$proj]}" "${PJ_FILES[$proj]}" "${svcs[@]}" <<<"$DOCKER_UP_SCRIPT" \
+        || { err "Compose-Projekt $proj: Neu erstellen fehlgeschlagen – siehe Log"; dfail=1; }
+    done
+    echo "  docker image prune -f"
+    ct_run "$id" 'docker image prune -f 2>&1' | grep -E '^(Total reclaimed space|deleted:)' | sed 's/^/    /'
+    if (( dfail )); then
+      RESULT[$id]+="${RESULT[$id]:+, }${R}Docker: Fehler beim Aktualisieren${N}"
+    else
+      ok "CT $id: ${new_cnt} Docker-Container mit neuem Image"
+      RESULT[$id]+="${RESULT[$id]:+, }${G}Docker: ${new_cnt} Image(s) aktualisiert${N}"
+    fi
+    post_check "$id"
+    RESULT[$id]+=$SVC_NOTE
+  done
+  (( DOCKER_FOUND )) || echo "  Kein Container mit laufenden Docker-Containern gefunden."
 fi
 
 # ----------------------------- Zusammenfassung -------------------------------
