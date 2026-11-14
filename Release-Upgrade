@@ -27,20 +27,23 @@
 #      Kein Release-Upgrade   Container, die nur Paket-Updates bekommen
 #      Gestoppte einbeziehen  gestoppte Container kurz starten und danach stoppen
 #    Erst mit „Starten“ läuft das Skript los, „Abbrechen“ beendet es sofort.
-#    Über „Skript aktualisieren“ wird die neueste Version von GitHub geholt.
 #
-#  Installation (lädt das Skript, installiert es und startet es):
+#  Start (holt immer die aktuelle Version von GitHub und führt sie aus):
 #    bash -c "$(curl -fsSL https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main/Release-Upgrade)"
+#  Beim ersten Start wird ein kleiner Starter nach /usr/local/sbin/Release-Upgrade
+#  angeboten. Er lädt bei jedem Aufruf ebenfalls die aktuelle Version von GitHub.
+#  Eigene Vorgaben (EXCLUDE, RELEASE_EXCLUDE, …) gehören in /etc/release-upgrade.conf.
 #
 #  Log: /var/log/release-upgrade/<Datum>.log
 # =============================================================================
-# RELEASE-UPGRADE-SCRIPT  (Kennung für die Update-Prüfung – nicht entfernen)
+# RELEASE-UPGRADE-SCRIPT  (Kennung für den Starter – nicht entfernen)
 set -uo pipefail
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 REPO_URL="https://github.com/Schoti9807/pve-lxc-upgrade"
 RAW_URL="https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main"
-INSTALL_PATH="/usr/local/sbin/Release-Upgrade"
+INSTALL_PATH="/usr/local/sbin/Release-Upgrade"   # hier liegt der Starter
+CONF_FILE="/etc/release-upgrade.conf"            # eigene Vorgaben, bleiben über Versionen erhalten
 
 # ----------------------------- Einstellungen ---------------------------------
 EXCLUDE=""            # Container komplett auslassen, z. B. "106"
@@ -50,6 +53,9 @@ BOOT_TIMEOUT=180      # Sekunden, die nach einem Neustart auf den Container gewa
 SERVICE_WAIT=90       # Sekunden, die nach einem Update auf fehlende Dienste gewartet wird
 # Kurzlebige Dienste, die beim Vorher/Nachher-Vergleich ignoriert werden (Regex)
 SERVICE_IGNORE='^(apt-daily|apt-daily-upgrade|man-db|packagekit|logrotate|dpkg-db-backup|e2scrub_.*|fstrim|systemd-tmpfiles-clean|phpsessionclean|user@.*|session-.*)\.service$'
+# Eigene Vorgaben aus der Konfigurationsdatei (überschreiben die Werte oben)
+# shellcheck source=/dev/null
+[[ -r $CONF_FILE ]] && . "$CONF_FILE"
 
 # Debian-Releases in Reihenfolge (Upgrade immer nur eine Stufe)
 DEB_ORDER=(stretch buster bullseye bookworm trixie forky duke)
@@ -281,103 +287,50 @@ find /etc -name '*.dpkg-dist' 2>/dev/null | sed 's/^/Neue Paketversion liegt dan
 exit 0
 EOF
 
-# ----------------------------- Installation & Update -------------------------
-script_version() { sed -n 's/^VERSION="\(.*\)"$/\1/p' "$1" 2>/dev/null | head -n1; }
-
-download_script() {   # lädt die aktuelle Version nach $1 und prüft sie
-  local dst=$1
-  curl -fsSL --max-time 30 "$RAW_URL/Release-Upgrade" -o "$dst" 2>/dev/null \
-    || { echo "Download von GitHub fehlgeschlagen ($RAW_URL)."; return 1; }
-  head -n1 "$dst" | grep -q '^#!/usr/bin/env bash' \
-    && grep -q '^# RELEASE-UPGRADE-SCRIPT' "$dst" \
-    && [[ -n $(script_version "$dst") ]] \
-    || { echo "Die geladene Datei ist kein gültiges Release-Upgrade-Skript."; return 1; }
-  bash -n "$dst" 2>/dev/null || { echo "Die geladene Datei enthält Syntaxfehler – Update abgelehnt."; return 1; }
-  sed -i 's/\r$//' "$dst"   # Windows-Zeilenenden entfernen, falls vorhanden
-  return 0
+# ----------------------------- Starter ---------------------------------------
+# Der Starter unter INSTALL_PATH enthält nicht das Skript selbst, sondern lädt
+# bei jedem Aufruf die aktuelle Version von GitHub und führt sie aus.
+starter_content() {
+  cat <<EOF
+#!/usr/bin/env bash
+# Release-Upgrade – Starter
+# Lädt bei jedem Aufruf die aktuelle Version von GitHub und führt sie aus.
+# Projekt: $REPO_URL
+# RELEASE-UPGRADE-STARTER  (Kennung – nicht entfernen)
+URL="$RAW_URL/Release-Upgrade"
+script=\$(curl -fsSL --max-time 30 "\$URL") \\
+  || { echo "Release-Upgrade: Download von GitHub fehlgeschlagen (\$URL)." >&2; exit 1; }
+script=\${script//\$'\\r'/}
+grep -q '^# RELEASE-UPGRADE-SCRIPT' <<<"\$script" \\
+  || { echo "Release-Upgrade: Die geladene Datei ist kein gültiges Release-Upgrade-Skript." >&2; exit 1; }
+exec bash -c "\$script" Release-Upgrade "\$@"
+EOF
 }
 
-install_file() {   # installiert $1 atomar nach INSTALL_PATH (ein laufendes Skript wird nicht beschädigt)
-  install -m 0755 "$1" "$INSTALL_PATH.new" && mv -f "$INSTALL_PATH.new" "$INSTALL_PATH"
-}
-
-self_install() {   # beim Start: noch nicht unter INSTALL_PATH installiert? → anbieten
-  local self cur new tmp msg
-  self=$(readlink -f "$0" 2>/dev/null || true)
-  [[ $self == "$INSTALL_PATH" ]] && return 0
-  cur=$(script_version "$INSTALL_PATH")
-  if [[ -n $cur ]]; then
-    msg="Release-Upgrade ist bereits installiert (Version $cur).\nDu startest gerade Version $VERSION.\n\nInstallierte Version durch Version $VERSION ersetzen?"
-  else
-    msg="Release-Upgrade ist noch nicht installiert.\n\nJetzt nach $INSTALL_PATH installieren?\nDanach startest du es jederzeit einfach mit:  Release-Upgrade"
-  fi
-  whiptail --title "Release-Upgrade $VERSION – Installation" --yes-button "Installieren" --no-button "Nur starten" \
-    --yesno "$msg" 14 72 || return 0
+install_starter() {   # beim Start: Starter fehlt oder ist veraltet → anlegen bzw. erneuern
+  local tmp msg
   tmp=$(mktemp)
-  if [[ -f $self ]] && grep -q '^# RELEASE-UPGRADE-SCRIPT' "$self"; then
-    cp "$self" "$tmp"                        # aus lokaler Datei
-  elif [[ -n ${BASH_EXECUTION_STRING:-} ]] && grep -q 'RELEASE-UPGRADE-SCRIPT' <<<"$BASH_EXECUTION_STRING"; then
-    printf '%s\n' "$BASH_EXECUTION_STRING" >"$tmp"   # über bash -c "$(curl …)" gestartet
-  else
-    download_script "$tmp" || { rm -f "$tmp"; whiptail --msgbox "Installation fehlgeschlagen." 8 50; return 0; }
+  starter_content >"$tmp"
+  if cmp -s "$tmp" "$INSTALL_PATH"; then rm -f "$tmp"; return 0; fi
+  if grep -q '^# RELEASE-UPGRADE-STARTER' "$INSTALL_PATH" 2>/dev/null; then
+    install -m 0755 "$tmp" "$INSTALL_PATH" 2>/dev/null   # eigener Starter, still erneuern
+    rm -f "$tmp"; return 0
   fi
-  sed -i 's/\r$//' "$tmp"
-  new=$(script_version "$tmp")
-  if bash -n "$tmp" && install_file "$tmp"; then
-    whiptail --title "Release-Upgrade – Installation" --msgbox \
-      "Version ${new:-$VERSION} wurde nach $INSTALL_PATH installiert.\n\nAb jetzt reicht der Befehl:  Release-Upgrade" 10 68
+  if [[ -e $INSTALL_PATH ]]; then
+    msg="Unter $INSTALL_PATH liegt noch eine fest installierte Kopie des Skripts.\n\nDurch den Starter ersetzen? Er lädt bei jedem Aufruf die aktuelle Version von GitHub.\nEigene Vorgaben bitte nach $CONF_FILE übernehmen."
   else
-    whiptail --msgbox "Installation fehlgeschlagen." 8 50
+    msg="Starter nach $INSTALL_PATH installieren?\n\nDanach startest du jederzeit einfach mit:  Release-Upgrade\nEs wird dabei immer die aktuelle Version von GitHub geladen."
+  fi
+  if whiptail --title "Release-Upgrade $VERSION – Starter" --yes-button "Installieren" --no-button "Nur starten" \
+       --yesno "$msg" 14 76; then
+    if install -m 0755 "$tmp" "$INSTALL_PATH.new" && mv -f "$INSTALL_PATH.new" "$INSTALL_PATH"; then
+      whiptail --title "Release-Upgrade – Starter" --msgbox \
+        "Starter installiert.\n\nAb jetzt reicht der Befehl:  Release-Upgrade" 10 60
+    else
+      whiptail --msgbox "Installation des Starters fehlgeschlagen." 8 50
+    fi
   fi
   rm -f "$tmp"
-}
-
-update_menu() {   # Menüpunkt „Skript aktualisieren“
-  local tmp info rem cur
-  tmp=$(mktemp -d)
-  whiptail --title "$WT_TITLE" --infobox "Suche nach einer neuen Version …\n$REPO_URL" 8 68
-  if ! info=$(download_script "$tmp/Release-Upgrade"); then
-    whiptail --title "Skript aktualisieren" --msgbox "$info\n\nBitte Internetverbindung prüfen oder später erneut versuchen." 11 72
-    rm -rf "$tmp"; return
-  fi
-  rem=$(script_version "$tmp/Release-Upgrade")
-  cur=$VERSION
-  if [[ $rem == "$cur" ]]; then
-    whiptail --title "Skript aktualisieren" --msgbox "Du hast bereits die aktuelle Version ($cur)." 8 60
-    rm -rf "$tmp"; return
-  fi
-  if ! ver_gt "$rem" "$cur"; then
-    whiptail --title "Skript aktualisieren" --yesno \
-      "Auf GitHub liegt Version $rem, installiert ist $cur (neuer).\n\nTrotzdem auf $rem wechseln?" 10 68 || { rm -rf "$tmp"; return; }
-  fi
-
-  # Änderungen anzeigen: CHANGELOG (falls vorhanden) + Unterschiede im Skript
-  {
-    echo "Installiert: $cur    Neu: $rem"
-    echo
-    if curl -fsSL --max-time 15 "$RAW_URL/CHANGELOG.md" -o "$tmp/CHANGELOG.md" 2>/dev/null; then
-      echo "=== Änderungen laut CHANGELOG ==="
-      awk '/^## /{n++} n>=1 && n<=3' "$tmp/CHANGELOG.md"
-      echo
-    fi
-    echo "=== Unterschiede im Skript (- alt / + neu) ==="
-    if [[ -f $INSTALL_PATH ]]; then diff -u "$INSTALL_PATH" "$tmp/Release-Upgrade" | tail -n +3
-    else echo "(noch nicht installiert – komplette Neuinstallation)"; fi
-  } >"$tmp/changes.txt"
-  whiptail --title "Änderungen $cur → $rem  (Pfeiltasten = blättern, Enter = weiter)" \
-    --scrolltext --textbox "$tmp/changes.txt" 24 100
-
-  if whiptail --title "Skript aktualisieren" --yesno "Release-Upgrade jetzt von $cur auf $rem aktualisieren?" 9 66; then
-    if install_file "$tmp/Release-Upgrade"; then
-      rm -rf "$tmp"
-      whiptail --title "Skript aktualisieren" --msgbox "Aktualisiert auf Version $rem.\nDas Menü wird mit der neuen Version neu gestartet." 9 62
-      clear
-      exec "$INSTALL_PATH"
-    else
-      whiptail --title "Skript aktualisieren" --msgbox "Installation fehlgeschlagen (Schreibrechte für $INSTALL_PATH?)." 8 70
-    fi
-  fi
-  rm -rf "$tmp"
 }
 
 # ----------------------------- Startmenü (whiptail) -------------------------
@@ -401,13 +354,12 @@ start_menu() {
   ((${#CT_LINES[@]})) || die "Keine Container gefunden."
   while true; do
     choice=$(whiptail --title "$WT_TITLE" --ok-button "Auswählen" --cancel-button "Abbrechen" \
-      --menu "Einstellungen anpassen und dann Starten wählen.\nEs wird erst etwas geprüft oder installiert, wenn du startest.\n\nBedienung: Pfeiltasten = Punkt wählen, Enter = öffnen/umschalten,\nTab = zu den Schaltflächen, Esc = Abbrechen" 24 76 9 \
+      --menu "Einstellungen anpassen und dann Starten wählen.\nEs wird erst etwas geprüft oder installiert, wenn du startest.\n\nBedienung: Pfeiltasten = Punkt wählen, Enter = öffnen/umschalten,\nTab = zu den Schaltflächen, Esc = Abbrechen" 23 76 8 \
       1 "Modus ................... $( ((CHECK_ONLY)) && echo 'nur prüfen' || echo 'prüfen + aktualisieren')" \
       2 "Nur diese Container ..... ${ONLY:-alle}" \
       3 "Container auslassen ..... ${EXCLUDE:-keine}" \
       4 "Kein Release-Upgrade .... ${RELEASE_EXCLUDE:-keine}" \
       5 "Gestoppte einbeziehen ... $( ((INCLUDE_STOPPED)) && echo ja || echo nein)" \
-      U "Skript aktualisieren (installiert: $VERSION)" \
       H "Hilfe zu den Einstellungen" \
       S ">>> Starten <<<" \
       3>&1 1>&2 2>&3) || { clear; echo "Release-Upgrade abgebrochen – es wurde nichts geändert."; exit 0; }
@@ -417,7 +369,6 @@ start_menu() {
       3) EXCLUDE=$(ct_pick "Diese Container komplett auslassen:" "$EXCLUDE") ;;
       4) RELEASE_EXCLUDE=$(ct_pick "Für diese Container KEIN Release-Upgrade (Paket-Updates laufen trotzdem):" "$RELEASE_EXCLUDE") ;;
       5) INCLUDE_STOPPED=$(( ! INCLUDE_STOPPED )) ;;
-      U) update_menu ;;
       H) whiptail --title "$WT_TITLE – Hilfe" --scrolltext --msgbox \
 "Bedienung
   Hauptmenü: Pfeiltasten = Punkt wählen, Enter = öffnen bzw. umschalten,
@@ -448,9 +399,10 @@ Gestoppte einbeziehen
   Gestoppte Container werden kurz gestartet, bearbeitet und danach wieder
   gestoppt. Sonst werden sie übersprungen.
 
-Skript aktualisieren
-  Lädt die neueste Version von GitHub, zeigt Changelog und Änderungen an
-  und installiert sie nach Bestätigung. Danach startet das Menü neu.
+Aktualität
+  Das Skript wird bei jedem Start frisch von GitHub geladen, du arbeitest
+  also immer mit der aktuellen Version ($VERSION). Eigene Vorgaben gehören
+  nach $CONF_FILE.
   Projekt: $REPO_URL
 
 Vor und nach jedem Update werden Dienste, Docker-Container und Ports
@@ -468,7 +420,8 @@ while (($#)); do
     -t|--ct)              ONLY=$(norm_list "${2:-}"); shift ;;
     -x|--exclude)         EXCLUDE="$EXCLUDE,$(norm_list "${2:-}")"; shift ;;
     -s|--include-stopped) INCLUDE_STOPPED=1 ;;
-    -h|--help)            awk 'NR>2 && /^# =====/{exit} NR>2{sub(/^# ?/, ""); print}' "$0"; exit 0 ;;
+    -h|--help)            { [[ -f $0 ]] && grep -q '^# RELEASE-UPGRADE-SCRIPT' "$0" && cat "$0" || printf '%s\n' "${BASH_EXECUTION_STRING:-}"; } \
+                            | awk 'NR>2 && /^# =====/{exit} NR>2{sub(/^# ?/, ""); print}'; exit 0 ;;
     *) die "Unbekannte Option: $1 (Hilfe: -h)" ;;
   esac
   shift
@@ -481,7 +434,7 @@ RELEASE_EXCLUDE=$(norm_list "$RELEASE_EXCLUDE")
 command -v pct >/dev/null || die "pct nicht gefunden – ist das ein Proxmox-VE-Host?"
 [[ -t 0 && -t 1 ]] || (( CHECK_ONLY )) || die "Interaktives Skript – bitte im Terminal starten (oder --check)."
 # Abhängigkeiten auf dem Host prüfen und fehlende Pakete automatisch installieren
-declare -A DEPS=([whiptail]=whiptail [curl]=curl [flock]=util-linux [comm]=coreutils [awk]=mawk [diff]=diffutils)
+declare -A DEPS=([whiptail]=whiptail [curl]=curl [flock]=util-linux [comm]=coreutils [awk]=mawk)
 MISSING=()
 for cmd in "${!DEPS[@]}"; do
   command -v "$cmd" >/dev/null 2>&1 || MISSING+=("${DEPS[$cmd]}")
@@ -501,7 +454,7 @@ fi
 
 # Startmenü (immer, sofern ein Terminal da ist)
 if [[ -t 0 && -t 1 ]]; then
-  self_install
+  install_starter
   start_menu
   EXCLUDE=$(norm_list "$EXCLUDE"); RELEASE_EXCLUDE=$(norm_list "$RELEASE_EXCLUDE"); ONLY=$(norm_list "$ONLY")
 fi
