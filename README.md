@@ -5,7 +5,7 @@
 Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du dort **Starten** wählst, passiert etwas.
 
 ```
-┌──────────── Release-Upgrade 1.4.0 – proxmox ─────────────┐
+┌──────────── Release-Upgrade 1.4.1 – proxmox ─────────────┐
 │ 1  Modus ................... prüfen + aktualisieren      │
 │ 2  Nur diese Container ..... alle                        │
 │ 3  Container auslassen ..... keine                       │
@@ -49,15 +49,15 @@ Das Skript wird immer direkt von GitHub geholt und ausgeführt. In der Shell des
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main/Release-Upgrade)"
 ```
 
-Beim ersten Start bietet das Skript an, einen kleinen **Starter** nach `/usr/local/sbin/Release-Upgrade` zu legen. Danach reicht der Befehl:
+Das ist der einzige Weg, das Skript zu starten. Es wird nichts lokal installiert, du arbeitest also immer mit dem neuesten Stand. Ohne Internetverbindung startet das Skript nicht.
+
+### Umstieg von Version 1.4.0 oder älter
+
+Liegt unter `/usr/local/sbin/Release-Upgrade` noch ein Starter oder eine Kopie des Skripts, weist das Skript beim Start darauf hin. Die Datei wird nicht mehr gebraucht und lässt sich so entfernen:
 
 ```bash
-Release-Upgrade
+rm /usr/local/sbin/Release-Upgrade
 ```
-
-Der Starter enthält nicht das Skript selbst. Er lädt bei jedem Aufruf die aktuelle Version von GitHub und führt sie aus. Du arbeitest also immer mit dem neuesten Stand, ein Menüpunkt zum Aktualisieren ist nicht mehr nötig. Ohne Internetverbindung startet das Skript nicht.
-
-Liegt unter `/usr/local/sbin/Release-Upgrade` noch eine fest installierte Kopie aus Version 1.3.0 oder älter, bietet das Skript an, sie durch den Starter zu ersetzen.
 
 ## Wichtige Hinweise
 
@@ -88,10 +88,11 @@ Mögliche Werte:
 
 ## Deinstallation
 
+Da nichts installiert wird, gibt es nur die Konfigurationsdatei und die Logs:
+
 ```bash
-rm /usr/local/sbin/Release-Upgrade   # Starter
-rm -f /etc/release-upgrade.conf      # optional: eigene Vorgaben
-rm -r /var/log/release-upgrade   # optional: Logs löschen
+rm -f /etc/release-upgrade.conf    # optional: eigene Vorgaben
+rm -r /var/log/release-upgrade     # optional: Logs löschen
 ```
 
 ## Haftungsausschluss
