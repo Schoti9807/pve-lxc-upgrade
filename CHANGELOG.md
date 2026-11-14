@@ -7,6 +7,12 @@ Versionsschema: VERSION.MAJOR.MINOR (z. B. 1.3.0).
 - **MAJOR:** wird bei jeder Änderung um 1 erhöht, außer es handelt sich um einen Hotfix.
 - **MINOR:** wird bei Hot- und Bugfixes um 1 erhöht.
 
+## 1.6.0 – 2026-11-14
+
+- Releases auf GitHub: Eine GitHub Action legt automatisch Tag `vX.Y.Z` und Release an, sobald sich `VERSION` auf `main` ändert. Die Notizen kommen aus diesem CHANGELOG, das Skript hängt als Datei am Release.
+- Ältere Versionen (1.3.0 bis 1.5.0) werden dabei als Tags und Releases nachgetragen
+- Der Startbefehl lädt jetzt das neueste Release statt des aktuellen Stands von `main`: `https://github.com/Schoti9807/pve-lxc-upgrade/releases/latest/download/Release-Upgrade`
+
 ## 1.5.0 – 2026-11-14
 
 - Neuer Menüpunkt **6 – Docker-Images** (Standard: aus, Kommandozeile: `-d`)

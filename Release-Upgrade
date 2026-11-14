@@ -32,8 +32,8 @@
 #      Docker-Images          neue Images für Compose-Container laden und Container neu erstellen
 #    Erst mit „Starten“ läuft das Skript los, „Abbrechen“ beendet es sofort.
 #
-#  Start (nur so – holt immer die aktuelle Version von GitHub und führt sie aus):
-#    bash -c "$(curl -fsSL https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main/Release-Upgrade)"
+#  Start (nur so – holt immer das neueste Release von GitHub und führt es aus):
+#    bash -c "$(curl -fsSL https://github.com/Schoti9807/pve-lxc-upgrade/releases/latest/download/Release-Upgrade)"
 #  Es wird nichts lokal installiert.
 #  Alle Einstellungen werden im Startmenü gesetzt, es gibt keine Konfigurationsdatei.
 #
@@ -42,9 +42,9 @@
 # RELEASE-UPGRADE-SCRIPT  (Kennung – nicht entfernen)
 set -uo pipefail
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 REPO_URL="https://github.com/Schoti9807/pve-lxc-upgrade"
-RAW_URL="https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main"
+DL_URL="https://github.com/Schoti9807/pve-lxc-upgrade/releases/latest/download/Release-Upgrade"   # neuestes Release
 OLD_INSTALL_PATH="/usr/local/sbin/Release-Upgrade"   # lokaler Start aus Version ≤ 1.4.0 (wird nur gemeldet)
 OLD_CONF_FILE="/etc/release-upgrade.conf"            # Konfigurationsdatei aus Version 1.4.0/1.4.1 (wird nur gemeldet)
 
@@ -344,7 +344,7 @@ check_old_install() {
   if [[ -e $OLD_INSTALL_PATH ]] && grep -qE '^# RELEASE-UPGRADE-(SCRIPT|STARTER)' "$OLD_INSTALL_PATH" 2>/dev/null; then
     msg+="Unter $OLD_INSTALL_PATH liegt noch ein lokaler Start aus einer älteren
 Version. Release-Upgrade wird nur noch direkt über GitHub gestartet:
-  bash -c \"\$(curl -fsSL $RAW_URL/Release-Upgrade)\"
+  bash -c \"\$(curl -fsSL $DL_URL)\"
 Entfernen mit:  rm $OLD_INSTALL_PATH
 
 "

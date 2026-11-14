@@ -1,0 +1,31 @@
+# Legt automatisch Tag und Release an, sobald sich VERSION im Skript auf main ändert.
+# Fehlende ältere Versionen aus dem CHANGELOG werden dabei nachgetragen.
+# Manuell starten: Actions → Release → Run workflow
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [Release-Upgrade, CHANGELOG.md]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Syntax prüfen
+        run: bash -n Release-Upgrade
+      - name: Tags und Releases anlegen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/release.sh

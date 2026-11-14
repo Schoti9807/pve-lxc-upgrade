@@ -5,7 +5,7 @@
 Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du dort **Starten** wählst, passiert etwas.
 
 ```
-┌──────────── Release-Upgrade 1.5.0 – proxmox ─────────────┐
+┌──────────── Release-Upgrade 1.6.0 – proxmox ─────────────┐
 │ 1  Modus ................... prüfen + aktualisieren      │
 │ 2  Nur diese Container ..... alle                        │
 │ 3  Container auslassen ..... keine                       │
@@ -45,10 +45,16 @@ Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du d
 
 ## Start
 
-Das Skript wird immer direkt von GitHub geholt und ausgeführt. In der Shell des Proxmox-Hosts:
+Das Skript wird immer direkt von GitHub geholt und ausgeführt, und zwar das neueste [Release](https://github.com/Schoti9807/pve-lxc-upgrade/releases). In der Shell des Proxmox-Hosts:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main/Release-Upgrade)"
+bash -c "$(curl -fsSL https://github.com/Schoti9807/pve-lxc-upgrade/releases/latest/download/Release-Upgrade)"
+```
+
+Eine bestimmte Version startest du über ihren Tag, z. B. 1.5.0:
+
+```bash
+bash -c "$(curl -fsSL https://github.com/Schoti9807/pve-lxc-upgrade/releases/download/v1.5.0/Release-Upgrade)"
 ```
 
 Das ist der einzige Weg, das Skript zu starten. Es wird nichts lokal installiert, du arbeitest also immer mit dem neuesten Stand. Ohne Internetverbindung startet das Skript nicht.
@@ -99,6 +105,12 @@ Da nichts installiert wird, bleiben nur die Logs:
 ```bash
 rm -r /var/log/release-upgrade   # optional: Logs löschen
 ```
+
+## Releases
+
+Sobald sich `VERSION` im Skript auf `main` ändert, legt eine GitHub Action (`.github/workflows/release.yml`) automatisch einen Tag `vX.Y.Z` und ein Release an. Die Release-Notizen kommen aus dem passenden Abschnitt im [CHANGELOG](CHANGELOG.md), das Skript hängt als Datei am Release. Fehlende ältere Versionen trägt die Action dabei nach. Manuell starten lässt sie sich unter **Actions → Release → Run workflow**.
+
+Für eine neue Version reicht es also, `VERSION` im Skript zu erhöhen und im CHANGELOG einen Abschnitt `## X.Y.Z – Datum` anzulegen.
 
 ## Haftungsausschluss
 
