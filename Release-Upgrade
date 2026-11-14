@@ -1,0 +1,779 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  Release-Upgrade
+#  Update-Prüfung und Aktualisierung aller LXC-Container – Proxmox-VE-Host
+#
+#  Autor:   Schoti9807
+#  Projekt: https://github.com/Schoti9807/pve-lxc-upgrade
+#  Lizenz:  MIT
+#
+#  Prüft jeden LXC (Debian / Ubuntu) auf
+#    1. Paket-Updates innerhalb der installierten Version (apt full-upgrade)
+#    2. ein neues Distributions-Release (z. B. Debian 12 → 13, Ubuntu 24.04 → 26.04)
+#  zeigt eine Übersicht und führt die Updates nach Bestätigung aus:
+#    - Paket-Updates: eine Abfrage für alle (oder Auswahl)
+#    - Release-Upgrades: eine Abfrage je Container, danach Neustart + Prüfung
+#  Vor und nach jedem Update/Upgrade wird verglichen, ob alle Dienste wieder
+#  laufen (systemd-Dienste, Docker-Container, offene TCP-Ports); fehlende
+#  Dienste/Container können direkt neu gestartet werden.
+#  Docker-Images in den Containern werden NICHT angefasst.
+#  VMs (z. B. Home Assistant) werden nicht berücksichtigt.
+#
+#  Aufruf:  Release-Upgrade
+#    Beim Start öffnet sich ein Menü, in dem alle Einstellungen gesetzt werden:
+#      Modus                  prüfen + aktualisieren  oder  nur prüfen
+#      Nur diese Container    Auswahl per Häkchen (nichts angehakt = alle)
+#      Container auslassen    Auswahl per Häkchen
+#      Kein Release-Upgrade   Container, die nur Paket-Updates bekommen
+#      Gestoppte einbeziehen  gestoppte Container kurz starten und danach stoppen
+#    Erst mit „Starten“ läuft das Skript los, „Abbrechen“ beendet es sofort.
+#    Über „Skript aktualisieren“ wird die neueste Version von GitHub geholt.
+#
+#  Installation (lädt das Skript, installiert es und startet es):
+#    bash -c "$(curl -fsSL https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main/Release-Upgrade)"
+#
+#  Log: /var/log/release-upgrade/<Datum>.log
+# =============================================================================
+# RELEASE-UPGRADE-SCRIPT  (Kennung für die Update-Prüfung – nicht entfernen)
+set -uo pipefail
+
+VERSION="1.0.0"
+REPO_URL="https://github.com/Schoti9807/pve-lxc-upgrade"
+RAW_URL="https://raw.githubusercontent.com/Schoti9807/pve-lxc-upgrade/main"
+INSTALL_PATH="/usr/local/sbin/Release-Upgrade"
+
+# ----------------------------- Einstellungen ---------------------------------
+EXCLUDE=""            # Container komplett auslassen, z. B. "106"
+RELEASE_EXCLUDE=""    # nur KEIN Release-Upgrade (Paket-Updates ja), z. B. "106,107"
+LOG_DIR="/var/log/release-upgrade"
+BOOT_TIMEOUT=180      # Sekunden, die nach einem Neustart auf den Container gewartet wird
+SERVICE_WAIT=90       # Sekunden, die nach einem Update auf fehlende Dienste gewartet wird
+# Kurzlebige Dienste, die beim Vorher/Nachher-Vergleich ignoriert werden (Regex)
+SERVICE_IGNORE='^(apt-daily|apt-daily-upgrade|man-db|packagekit|logrotate|dpkg-db-backup|e2scrub_.*|fstrim|systemd-tmpfiles-clean|phpsessionclean|user@.*|session-.*)\.service$'
+
+# Debian-Releases in Reihenfolge (Upgrade immer nur eine Stufe)
+DEB_ORDER=(stretch buster bullseye bookworm trixie forky duke)
+declare -A DEB_NUM=([stretch]=9 [buster]=10 [bullseye]=11 [bookworm]=12 [trixie]=13 [forky]=14 [duke]=15)
+
+# ----------------------------- Hilfsfunktionen -------------------------------
+if [[ -t 1 ]]; then
+  R=$'\e[31m' G=$'\e[32m' Y=$'\e[33m' C=$'\e[36m' B=$'\e[1m' D=$'\e[2m' N=$'\e[0m'
+else
+  R='' G='' Y='' C='' B='' D='' N=''
+fi
+info() { printf '\n%s==> %s%s\n' "$B" "$*" "$N"; }
+ok()   { printf '%s  ✔ %s%s\n' "$G" "$*" "$N"; }
+warn() { printf '%s  ! %s%s\n' "$Y" "$*" "$N"; }
+err()  { printf '%s  ✘ %s%s\n' "$R" "$*" "$N"; }
+die()  { err "$*"; exit 1; }
+
+ask() {   # ask "Frage" → 0 bei j/J/y/Y
+  local a
+  read -r -p "  $* [j/N] " a </dev/tty || return 1
+  [[ $a =~ ^[jJyY]$ ]]
+}
+norm_list() { tr ' ;' ',,' <<<"$1" | tr -s ','; }
+in_list()   { [[ ",$2," == *",$1,"* ]]; }
+ver_gt()    { [[ $1 != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]; }
+deb_idx()   { local i; for i in "${!DEB_ORDER[@]}"; do [[ ${DEB_ORDER[$i]} == "$1" ]] && { echo "$i"; return 0; }; done; return 1; }
+
+# Befehle im Container mit sauberer Umgebung ausführen
+CT_ENV=(env -i HOME=/root LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
+ct_run()    { local id=$1; shift; pct exec "$id" -- "${CT_ENV[@]}" bash -c "$1"; }
+ct_script() { local id=$1; shift; pct exec "$id" -- "${CT_ENV[@]}" bash -s -- "$@"; }   # Skript per stdin
+
+wait_ct_ready() {   # wartet, bis systemd läuft und DNS funktioniert
+  local id=$1 i state
+  for ((i = 0; i < BOOT_TIMEOUT; i += 3)); do
+    state=$(pct exec "$id" -- systemctl is-system-running 2>/dev/null)
+    [[ $state == running || $state == degraded ]] && break
+    sleep 3
+  done
+  [[ $state == running || $state == degraded ]] || return 1
+  for ((i = 0; i < 30; i += 3)); do
+    ct_run "$id" 'getent hosts deb.debian.org >/dev/null || getent hosts archive.ubuntu.com >/dev/null' && return 0
+    sleep 3
+  done
+  return 0   # System läuft, nur DNS noch nicht – apt meldet das später selbst
+}
+
+last_backup() {   # jüngstes Backup-Datum eines Gastes über alle Backup-Storages
+  local id=$1 st
+  for st in $(pvesm status --content backup 2>/dev/null | awk 'NR>1 && $3=="active"{print $1}'); do
+    pvesm list "$st" --vmid "$id" 2>/dev/null | awk 'NR>1{print $1}'
+  done | grep -oE '[0-9]{4}[-_][0-9]{2}[-_][0-9]{2}' | tr '_' '-' | sort | tail -n1
+}
+
+# ----------------------------- Dienst-Prüfung --------------------------------
+# Momentaufnahme: laufende systemd-Dienste, laufende Docker-Container, offene TCP-Ports (< 32768)
+snapshot() {
+  local id=$1
+  {
+    pct exec "$id" -- systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null \
+      | ign="$SERVICE_IGNORE" awk '$1 !~ ENVIRON["ign"] {print "Dienst  " $1}'
+    if ct_run "$id" 'command -v docker >/dev/null'; then
+      pct exec "$id" -- docker ps --filter status=running --format '{{.Names}}' 2>/dev/null \
+        | awk 'NF {print "Docker  " $1}'
+    fi
+    pct exec "$id" -- ss -Htln 2>/dev/null \
+      | awk '{p=$4; sub(/.*:/, "", p); if (p ~ /^[0-9]+$/ && p+0 < 32768) print "Port    tcp/" p}'
+  } | sort -u
+}
+
+# Probleme: fehlgeschlagene Dienste, Docker-Container unhealthy / in Neustart-Schleife
+problems() {
+  local id=$1
+  {
+    pct exec "$id" -- systemctl --failed --no-legend --plain 2>/dev/null \
+      | awk '$1 ~ /\./ {print "fehlgeschlagen: " $1}'
+    if ct_run "$id" 'command -v docker >/dev/null'; then
+      pct exec "$id" -- docker ps --filter health=unhealthy --format 'Docker unhealthy: {{.Names}}' 2>/dev/null
+      pct exec "$id" -- docker ps --filter status=restarting --format 'Docker startet ständig neu: {{.Names}}' 2>/dev/null
+    fi
+  } | sort -u
+}
+
+snap_summary() {   # "12 Dienste, 3 Docker-Container, 5 Ports"
+  awk '{c[$1]++} END {printf "%d Dienste, %d Docker-Container, %d Ports", c["Dienst"], c["Docker"], c["Port"]}' "$1"
+}
+
+pre_check() {   # Zustand vor dem Update festhalten und anzeigen
+  local id=$1
+  snapshot "$id" >"$TMP/before.$id"
+  problems "$id" >"$TMP/prob.$id"
+  echo "  Vorher: $(snap_summary "$TMP/before.$id")"
+  if [[ -s $TMP/prob.$id ]]; then
+    warn "Bereits VOR dem Update fehlerhaft (wird nachher nicht als neu gewertet):"
+    sed 's/^/      /' "$TMP/prob.$id"
+  fi
+}
+
+post_check() {   # Vergleich nach dem Update; setzt SVC_NOTE für die Zusammenfassung
+  local id=$1; local before="$TMP/before.$id" after="$TMP/after.$id" missing new newprob i a kind name
+  SVC_NOTE=''
+  [[ -f $before ]] || return 0
+  for ((i = 0; i <= SERVICE_WAIT; i += 5)); do
+    snapshot "$id" >"$after"
+    missing=$(comm -23 "$before" "$after")
+    [[ -z $missing ]] && break
+    (( i == 0 )) && echo "  Warte, bis alle Dienste wieder laufen (max. ${SERVICE_WAIT}s) …"
+    sleep 5
+  done
+  new=$(comm -13 "$before" "$after")
+  newprob=$(problems "$id" | comm -13 "$TMP/prob.$id" -)
+
+  echo "  Nachher: $(snap_summary "$after")"
+  if [[ -z $missing ]]; then
+    ok "Dienst-Prüfung: alles von vorher läuft wieder"
+  else
+    warn "Nach dem Update fehlt:"
+    sed 's/^/      /' <<<"$missing"
+    if grep -qE '^(Dienst|Docker) ' <<<"$missing" && ask "Fehlende Dienste/Container jetzt neu starten?"; then
+      while read -r kind name; do
+        case $kind in
+          Dienst) echo "    systemctl restart $name"; pct exec "$id" -- systemctl restart "$name" ;;
+          Docker) echo "    docker start $name";      pct exec "$id" -- docker start "$name" >/dev/null ;;
+        esac
+      done <<<"$missing"
+      sleep 10
+      snapshot "$id" >"$after"
+      missing=$(comm -23 "$before" "$after")
+      if [[ -z $missing ]]; then ok "Nach Neustart läuft alles wieder"
+      else warn "Weiterhin fehlend:"; sed 's/^/      /' <<<"$missing"; fi
+    fi
+  fi
+  [[ -n $new ]] && { echo "  Neu hinzugekommen:"; sed 's/^/      /' <<<"$new"; }
+  if [[ -n $newprob ]]; then
+    warn "Neue Probleme seit dem Update:"
+    sed 's/^/      /' <<<"$newprob"
+  fi
+
+  if [[ -n $missing || -n $newprob ]]; then
+    a=$(printf '%s\n%s\n' "$missing" "$newprob" | grep -c .)
+    SVC_NOTE=" ${Y}(${a} Dienst-Abweichung(en) – siehe Log)${N}"
+  else
+    SVC_NOTE=" ${D}(Dienste ok)${N}"
+  fi
+}
+
+read_os() {   # setzt OS / VER / CODE / VERTXT für einen Container
+  local id=$1 osr dv
+  osr=$(pct exec "$id" -- cat /etc/os-release 2>/dev/null) || return 1
+  OS[$id]=$(sed -n 's/^ID=//p' <<<"$osr" | tr -d '"')
+  VER[$id]=$(sed -n 's/^VERSION_ID=//p' <<<"$osr" | tr -d '"')
+  CODE[$id]=$(sed -n 's/^VERSION_CODENAME=//p' <<<"$osr" | tr -d '"')
+  VERTXT[$id]="${OS[$id]^} ${VER[$id]} (${CODE[$id]})"
+  if [[ ${OS[$id]} == debian ]]; then
+    dv=$(pct exec "$id" -- cat /etc/debian_version 2>/dev/null)
+    [[ $dv =~ ^[0-9]+\.[0-9]+$ ]] && VERTXT[$id]="Debian $dv (${CODE[$id]})"
+  fi
+}
+
+# ----------------------------- Skripte für die Container ---------------------
+read -r -d '' PKG_SCRIPT <<'EOF'
+set -uo pipefail
+APT=(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=300)
+"${APT[@]}" update || exit 10
+"${APT[@]}" full-upgrade || exit 20
+"${APT[@]}" autoremove --purge
+"${APT[@]}" clean
+exit 0
+EOF
+
+read -r -d '' DEB_REL_SCRIPT <<'EOF'
+set -uo pipefail
+OLD=$1 NEW=$2
+APT=(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=300)
+step() { echo; echo "--- $*"; }
+
+step "Aktuelles Release ($OLD) vollständig aktualisieren"
+"${APT[@]}" update && "${APT[@]}" full-upgrade || exit 10
+
+step "Paketquellen sichern"
+BK=/root/apt-quellen-$OLD-$(date +%Y%m%d-%H%M%S).tar.gz
+tar czf "$BK" -C / etc/apt || exit 11
+echo "Sicherung: $BK"
+
+step "Paketquellen $OLD -> $NEW umstellen"
+mapfile -t FILES < <(find /etc/apt/sources.list /etc/apt/sources.list.d -maxdepth 1 -type f \
+                     \( -name sources.list -o -name '*.list' -o -name '*.sources' \) 2>/dev/null)
+((${#FILES[@]})) || { echo "Keine Paketquellen gefunden"; exit 12; }
+sed -i -E "s/\b${OLD}\b/${NEW}/g; s#\b${NEW}/updates\b#${NEW}-security#g" "${FILES[@]}"
+grep -hE '^[[:space:]]*(deb |URIs:|Suites:)' "${FILES[@]}" | sed 's/^/    /'
+
+step "Paketlisten für $NEW laden"
+out=$("${APT[@]}" update 2>&1); rc=$?
+echo "$out"
+if (( rc != 0 )) || grep -qE '^(E:|Err:)' <<<"$out"; then
+  echo
+  echo "!!! Mindestens eine Paketquelle bietet '$NEW' (noch) nicht an."
+  echo "!!! Paketquellen werden zurückgesetzt, am System wurde nichts geändert."
+  tar xzf "$BK" -C / && "${APT[@]}" update >/dev/null 2>&1
+  exit 20
+fi
+
+step "Minimales Upgrade (ohne neue Pakete)"
+"${APT[@]}" upgrade --without-new-pkgs || exit 30
+step "Vollständiges Upgrade"
+"${APT[@]}" full-upgrade || exit 31
+"${APT[@]}" autoremove --purge
+"${APT[@]}" clean
+exit 0
+EOF
+
+read -r -d '' UBU_REL_SCRIPT <<'EOF'
+set -uo pipefail
+APT=(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=300)
+echo "--- Aktuelles Release vollständig aktualisieren"
+"${APT[@]}" update && "${APT[@]}" full-upgrade || exit 10
+"${APT[@]}" install ubuntu-release-upgrader-core || exit 11
+echo "--- do-release-upgrade"
+# Konfigurationsdatei-Abfragen automatisch beantworten: eigene Version behalten
+CONF=/etc/apt/apt.conf.d/99release-upgrade-keep-conffiles
+printf '%s\n' 'Dpkg::Options { "--force-confdef"; "--force-confold"; };' >"$CONF"
+do-release-upgrade -f DistUpgradeViewNonInteractive; rc=$?
+rm -f "$CONF"
+(( rc == 0 )) || exit 30
+find /etc -name '*.dpkg-dist' 2>/dev/null | sed 's/^/Neue Paketversion liegt daneben: /'
+"${APT[@]}" autoremove --purge
+"${APT[@]}" clean
+exit 0
+EOF
+
+# ----------------------------- Installation & Update -------------------------
+script_version() { sed -n 's/^VERSION="\(.*\)"$/\1/p' "$1" 2>/dev/null | head -n1; }
+
+download_script() {   # lädt die aktuelle Version nach $1 und prüft sie
+  local dst=$1
+  curl -fsSL --max-time 30 "$RAW_URL/Release-Upgrade" -o "$dst" 2>/dev/null \
+    || { echo "Download von GitHub fehlgeschlagen ($RAW_URL)."; return 1; }
+  head -n1 "$dst" | grep -q '^#!/usr/bin/env bash' \
+    && grep -q '^# RELEASE-UPGRADE-SCRIPT' "$dst" \
+    && [[ -n $(script_version "$dst") ]] \
+    || { echo "Die geladene Datei ist kein gültiges Release-Upgrade-Skript."; return 1; }
+  bash -n "$dst" 2>/dev/null || { echo "Die geladene Datei enthält Syntaxfehler – Update abgelehnt."; return 1; }
+  sed -i 's/\r$//' "$dst"   # Windows-Zeilenenden entfernen, falls vorhanden
+  return 0
+}
+
+install_file() {   # installiert $1 atomar nach INSTALL_PATH (ein laufendes Skript wird nicht beschädigt)
+  install -m 0755 "$1" "$INSTALL_PATH.new" && mv -f "$INSTALL_PATH.new" "$INSTALL_PATH"
+}
+
+self_install() {   # beim Start: noch nicht unter INSTALL_PATH installiert? → anbieten
+  local self cur new tmp msg
+  self=$(readlink -f "$0" 2>/dev/null || true)
+  [[ $self == "$INSTALL_PATH" ]] && return 0
+  cur=$(script_version "$INSTALL_PATH")
+  if [[ -n $cur ]]; then
+    msg="Release-Upgrade ist bereits installiert (Version $cur).\nDu startest gerade Version $VERSION.\n\nInstallierte Version durch Version $VERSION ersetzen?"
+  else
+    msg="Release-Upgrade ist noch nicht installiert.\n\nJetzt nach $INSTALL_PATH installieren?\nDanach startest du es jederzeit einfach mit:  Release-Upgrade"
+  fi
+  whiptail --title "Release-Upgrade $VERSION – Installation" --yes-button "Installieren" --no-button "Nur starten" \
+    --yesno "$msg" 14 72 || return 0
+  tmp=$(mktemp)
+  if [[ -f $self ]] && grep -q '^# RELEASE-UPGRADE-SCRIPT' "$self"; then
+    cp "$self" "$tmp"                        # aus lokaler Datei
+  elif [[ -n ${BASH_EXECUTION_STRING:-} ]] && grep -q 'RELEASE-UPGRADE-SCRIPT' <<<"$BASH_EXECUTION_STRING"; then
+    printf '%s\n' "$BASH_EXECUTION_STRING" >"$tmp"   # über bash -c "$(curl …)" gestartet
+  else
+    download_script "$tmp" || { rm -f "$tmp"; whiptail --msgbox "Installation fehlgeschlagen." 8 50; return 0; }
+  fi
+  sed -i 's/\r$//' "$tmp"
+  new=$(script_version "$tmp")
+  if bash -n "$tmp" && install_file "$tmp"; then
+    whiptail --title "Release-Upgrade – Installation" --msgbox \
+      "Version ${new:-$VERSION} wurde nach $INSTALL_PATH installiert.\n\nAb jetzt reicht der Befehl:  Release-Upgrade" 10 68
+  else
+    whiptail --msgbox "Installation fehlgeschlagen." 8 50
+  fi
+  rm -f "$tmp"
+}
+
+update_menu() {   # Menüpunkt „Skript aktualisieren“
+  local tmp info rem cur
+  tmp=$(mktemp -d)
+  whiptail --title "$WT_TITLE" --infobox "Suche nach einer neuen Version …\n$REPO_URL" 8 68
+  if ! info=$(download_script "$tmp/Release-Upgrade"); then
+    whiptail --title "Skript aktualisieren" --msgbox "$info\n\nBitte Internetverbindung prüfen oder später erneut versuchen." 11 72
+    rm -rf "$tmp"; return
+  fi
+  rem=$(script_version "$tmp/Release-Upgrade")
+  cur=$VERSION
+  if [[ $rem == "$cur" ]]; then
+    whiptail --title "Skript aktualisieren" --msgbox "Du hast bereits die aktuelle Version ($cur)." 8 60
+    rm -rf "$tmp"; return
+  fi
+  if ! ver_gt "$rem" "$cur"; then
+    whiptail --title "Skript aktualisieren" --yesno \
+      "Auf GitHub liegt Version $rem, installiert ist $cur (neuer).\n\nTrotzdem auf $rem wechseln?" 10 68 || { rm -rf "$tmp"; return; }
+  fi
+
+  # Änderungen anzeigen: CHANGELOG (falls vorhanden) + Unterschiede im Skript
+  {
+    echo "Installiert: $cur    Neu: $rem"
+    echo
+    if curl -fsSL --max-time 15 "$RAW_URL/CHANGELOG.md" -o "$tmp/CHANGELOG.md" 2>/dev/null; then
+      echo "=== Änderungen laut CHANGELOG ==="
+      awk '/^## /{n++} n>=1 && n<=3' "$tmp/CHANGELOG.md"
+      echo
+    fi
+    echo "=== Unterschiede im Skript (- alt / + neu) ==="
+    if [[ -f $INSTALL_PATH ]]; then diff -u "$INSTALL_PATH" "$tmp/Release-Upgrade" | tail -n +3
+    else echo "(noch nicht installiert – komplette Neuinstallation)"; fi
+  } >"$tmp/changes.txt"
+  whiptail --title "Änderungen $cur → $rem  (Pfeiltasten = blättern, Enter = weiter)" \
+    --scrolltext --textbox "$tmp/changes.txt" 24 100
+
+  if whiptail --title "Skript aktualisieren" --yesno "Release-Upgrade jetzt von $cur auf $rem aktualisieren?" 9 66; then
+    if install_file "$tmp/Release-Upgrade"; then
+      rm -rf "$tmp"
+      whiptail --title "Skript aktualisieren" --msgbox "Aktualisiert auf Version $rem.\nDas Menü wird mit der neuen Version neu gestartet." 9 62
+      clear
+      exec "$INSTALL_PATH"
+    else
+      whiptail --title "Skript aktualisieren" --msgbox "Installation fehlgeschlagen (Schreibrechte für $INSTALL_PATH?)." 8 70
+    fi
+  fi
+  rm -rf "$tmp"
+}
+
+# ----------------------------- Startmenü (whiptail) -------------------------
+WT_TITLE="Release-Upgrade $VERSION – $(hostname)"
+
+ct_pick() {   # ct_pick "Text" "aktuelle,Liste" → neue Liste (Komma-getrennt)
+  local text=$1 cur=$2 args=() line id st name sel
+  for line in "${CT_LINES[@]}"; do
+    read -r id st name <<<"$line"
+    args+=("$id" "$(printf '%-22s %s' "$name" "$st")" "$(in_list "$id" "$cur" && echo ON || echo OFF)")
+  done
+  sel=$(whiptail --title "$WT_TITLE" --ok-button "Übernehmen" --cancel-button "Zurück" \
+        --checklist "$text\n\nBedienung: Pfeiltasten = Container wählen, Leertaste = an-/abhaken,\nEnter = übernehmen, Esc oder Zurück = alte Auswahl behalten" 24 74 12 \
+        "${args[@]}" 3>&1 1>&2 2>&3) || { echo "$cur"; return; }
+  tr -d '"' <<<"$sel" | tr -s ' ' ',' | sed 's/^,//; s/,$//'
+}
+
+start_menu() {
+  local choice
+  mapfile -t CT_LINES < <(pct list 2>/dev/null | awk 'NR>1{print $1, $2, $NF}' | sort -n)
+  ((${#CT_LINES[@]})) || die "Keine Container gefunden."
+  while true; do
+    choice=$(whiptail --title "$WT_TITLE" --ok-button "Auswählen" --cancel-button "Abbrechen" \
+      --menu "Einstellungen anpassen und dann Starten wählen.\nEs wird erst etwas geprüft oder installiert, wenn du startest.\n\nBedienung: Pfeiltasten = Punkt wählen, Enter = öffnen/umschalten,\nTab = zu den Schaltflächen, Esc = Abbrechen" 24 76 9 \
+      1 "Modus ................... $( ((CHECK_ONLY)) && echo 'nur prüfen' || echo 'prüfen + aktualisieren')" \
+      2 "Nur diese Container ..... ${ONLY:-alle}" \
+      3 "Container auslassen ..... ${EXCLUDE:-keine}" \
+      4 "Kein Release-Upgrade .... ${RELEASE_EXCLUDE:-keine}" \
+      5 "Gestoppte einbeziehen ... $( ((INCLUDE_STOPPED)) && echo ja || echo nein)" \
+      U "Skript aktualisieren (installiert: $VERSION)" \
+      H "Hilfe zu den Einstellungen" \
+      S ">>> Starten <<<" \
+      3>&1 1>&2 2>&3) || { clear; echo "Release-Upgrade abgebrochen – es wurde nichts geändert."; exit 0; }
+    case $choice in
+      1) CHECK_ONLY=$(( ! CHECK_ONLY )) ;;
+      2) ONLY=$(ct_pick "Nur diese Container prüfen/aktualisieren (nichts angehakt = alle):" "$ONLY") ;;
+      3) EXCLUDE=$(ct_pick "Diese Container komplett auslassen:" "$EXCLUDE") ;;
+      4) RELEASE_EXCLUDE=$(ct_pick "Für diese Container KEIN Release-Upgrade (Paket-Updates laufen trotzdem):" "$RELEASE_EXCLUDE") ;;
+      5) INCLUDE_STOPPED=$(( ! INCLUDE_STOPPED )) ;;
+      U) update_menu ;;
+      H) whiptail --title "$WT_TITLE – Hilfe" --scrolltext --msgbox \
+"Bedienung
+  Hauptmenü: Pfeiltasten = Punkt wählen, Enter = öffnen bzw. umschalten,
+  Tab = zwischen Liste und Schaltflächen wechseln, Esc = Abbrechen.
+  Punkte 1 und 5 schalten bei Enter direkt um.
+  Punkte 2, 3 und 4 öffnen eine Container-Liste: Leertaste = an-/abhaken,
+  Enter = übernehmen, Esc oder Zurück = alte Auswahl behalten.
+  Mit Starten beginnt die Prüfung, mit Abbrechen wird nichts geändert.
+  In dieser Hilfe: Pfeiltasten = blättern, Enter = zurück.
+
+Modus
+  prüfen + aktualisieren: Übersicht, danach Abfragen für Paket-Updates
+  (alle/Auswahl) und je Container für ein Release-Upgrade.
+  nur prüfen: nur Übersicht, es wird nichts installiert.
+
+Nur diese Container
+  Nur die angehakten Container werden bearbeitet. Nichts angehakt = alle.
+
+Container auslassen
+  Angehakte Container werden komplett übersprungen.
+
+Kein Release-Upgrade
+  Angehakte Container bekommen nur Paket-Updates, keinen Versionssprung
+  (z. B. für Container mit Herstellersoftware wie dem UniFi OS Server,
+  die nur bestimmte Releases unterstützt).
+
+Gestoppte einbeziehen
+  Gestoppte Container werden kurz gestartet, bearbeitet und danach wieder
+  gestoppt. Sonst werden sie übersprungen.
+
+Skript aktualisieren
+  Lädt die neueste Version von GitHub, zeigt Changelog und Änderungen an
+  und installiert sie nach Bestätigung. Danach startet das Menü neu.
+  Projekt: $REPO_URL
+
+Vor und nach jedem Update werden Dienste, Docker-Container und Ports
+verglichen. Log: $LOG_DIR" 24 78 ;;
+      S) clear; return 0 ;;
+    esac
+  done
+}
+
+# ----------------------------- Optionen --------------------------------------
+CHECK_ONLY=0 ONLY="" INCLUDE_STOPPED=0
+while (($#)); do
+  case $1 in
+    -c|--check)           CHECK_ONLY=1 ;;
+    -t|--ct)              ONLY=$(norm_list "${2:-}"); shift ;;
+    -x|--exclude)         EXCLUDE="$EXCLUDE,$(norm_list "${2:-}")"; shift ;;
+    -s|--include-stopped) INCLUDE_STOPPED=1 ;;
+    -h|--help)            awk 'NR>2 && /^# =====/{exit} NR>2{sub(/^# ?/, ""); print}' "$0"; exit 0 ;;
+    *) die "Unbekannte Option: $1 (Hilfe: -h)" ;;
+  esac
+  shift
+done
+EXCLUDE=$(norm_list "$EXCLUDE")
+RELEASE_EXCLUDE=$(norm_list "$RELEASE_EXCLUDE")
+
+# ----------------------------- Vorprüfungen ----------------------------------
+(( EUID == 0 ))           || die "Bitte als root auf dem Proxmox-Host ausführen."
+command -v pct >/dev/null || die "pct nicht gefunden – ist das ein Proxmox-VE-Host?"
+[[ -t 0 && -t 1 ]] || (( CHECK_ONLY )) || die "Interaktives Skript – bitte im Terminal starten (oder --check)."
+# Abhängigkeiten auf dem Host prüfen und fehlende Pakete automatisch installieren
+declare -A DEPS=([whiptail]=whiptail [curl]=curl [flock]=util-linux [comm]=coreutils [awk]=mawk [diff]=diffutils)
+MISSING=()
+for cmd in "${!DEPS[@]}"; do
+  command -v "$cmd" >/dev/null 2>&1 || MISSING+=("${DEPS[$cmd]}")
+done
+if ((${#MISSING[@]})); then
+  mapfile -t MISSING < <(printf '%s\n' "${MISSING[@]}" | sort -u)
+  echo "Fehlende Abhängigkeiten werden installiert: ${MISSING[*]}"
+  if ! { DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null &&
+         DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${MISSING[@]}" >/dev/null; }; then
+    die "Installation fehlgeschlagen – bitte manuell ausführen: apt install ${MISSING[*]}"
+  fi
+  for cmd in "${!DEPS[@]}"; do
+    command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' ist nach der Installation immer noch nicht verfügbar."
+  done
+  echo "Abhängigkeiten installiert."
+fi
+
+# Startmenü (immer, sofern ein Terminal da ist)
+if [[ -t 0 && -t 1 ]]; then
+  self_install
+  start_menu
+  EXCLUDE=$(norm_list "$EXCLUDE"); RELEASE_EXCLUDE=$(norm_list "$RELEASE_EXCLUDE"); ONLY=$(norm_list "$ONLY")
+fi
+
+exec 9>/run/release-upgrade.lock
+flock -n 9 || die "Release-Upgrade läuft bereits."
+
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/$(date +%Y-%m-%d_%H-%M-%S).log"
+exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >>"$LOG")) 2>&1
+TMP=$(mktemp -d)
+
+declare -A NAME OS VER CODE VERTXT PKG_CNT PKG_LIST REL_CODE REL_TXT NOTE IS_PBS RESULT STARTED
+CTS=()
+
+cleanup() {
+  local id
+  for id in "${!STARTED[@]}"; do
+    echo "  CT $id wird wieder gestoppt (war vorher aus) …"
+    pct shutdown "$id" --timeout 60 >/dev/null 2>&1 || pct stop "$id" >/dev/null 2>&1
+  done
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+printf '%sRelease-Upgrade %s%s  –  %s  –  Host %s\n' "$B" "$VERSION" "$N" "$(date '+%d.%m.%Y %H:%M')" "$(hostname)"
+printf '%sLog: %s%s\n' "$D" "$LOG" "$N"
+printf '%sEinstellungen: Modus=%s | Nur=%s | Auslassen=%s | Kein Release=%s | Gestoppte=%s%s\n' "$D" \
+  "$( ((CHECK_ONLY)) && echo 'nur prüfen' || echo 'prüfen + aktualisieren')" "${ONLY:-alle}" "${EXCLUDE:-keine}" \
+  "${RELEASE_EXCLUDE:-keine}" "$( ((INCLUDE_STOPPED)) && echo ja || echo nein)" "$N"
+
+if [[ -n ${SSH_CONNECTION:-} && -z ${TMUX:-}${STY:-} ]] && (( ! CHECK_ONLY )); then
+  warn "Du bist per SSH verbunden und nicht in tmux/screen."
+  warn "Bricht die Verbindung ab (z. B. Update/Neustart eines VPN- oder Reverse-Proxy-Containers),"
+  warn "wird ein laufendes Upgrade mit abgebrochen. Empfehlung: erst 'tmux' starten."
+  ask "Trotzdem fortfahren?" || exit 0
+fi
+
+# ----------------------------- Referenz-Releases -----------------------------
+info "Aktuelle Releases ermitteln"
+DEB_STABLE=$(curl -fsSL --max-time 15 https://deb.debian.org/debian/dists/stable/Release 2>/dev/null \
+             | awk '/^Codename:/{print $2; exit}')
+if [[ -z $DEB_STABLE ]]; then
+  DEB_STABLE=$(. /etc/os-release && echo "$VERSION_CODENAME")
+  warn "deb.debian.org nicht erreichbar – nehme Host-Release '$DEB_STABLE' als Debian stable."
+fi
+ok "Debian stable: ${DEB_NUM[$DEB_STABLE]:-?} ($DEB_STABLE)"
+
+ubuntu_meta() {   # gibt "dist version supported" je Release aus (gecacht)
+  local kind=$1 f="$TMP/meta-$1" url=https://changelogs.ubuntu.com/meta-release
+  [[ $kind == lts ]] && url+=-lts
+  [[ -f $f ]] || curl -fsSL --max-time 15 "$url" 2>/dev/null | awk '
+      /^Dist:/{d=$2} /^Version:/{v=$2} /^Supported:/{s=$2}
+      /^$/{ if (d!="") print d, v, s; d=v=s="" }
+      END { if (d!="") print d, v, s }' >"$f"
+  cat "$f"
+}
+
+# ----------------------------- Container einsammeln --------------------------
+mapfile -t ALL < <(pct list 2>/dev/null | awk 'NR>1{print $1}' | sort -n)
+((${#ALL[@]})) || die "Keine Container gefunden."
+
+info "Container prüfen"
+for id in "${ALL[@]}"; do
+  NAME[$id]=$(pct config "$id" 2>/dev/null | awk '/^hostname:/{print $2}')
+  [[ -n $ONLY ]] && ! in_list "$id" "$ONLY" && continue
+  in_list "$id" "$EXCLUDE" && { NOTE[$id]="ausgeschlossen"; CTS+=("$id"); continue; }
+  CTS+=("$id")
+  printf '  CT %-4s %-22s ' "$id" "${NAME[$id]}"
+
+  cfg=$(pct config "$id" 2>/dev/null)
+  if grep -q '^template: 1' <<<"$cfg"; then NOTE[$id]="Template"; echo "${D}Template – übersprungen${N}"; continue; fi
+  if lock=$(awk '/^lock:/{print $2}' <<<"$cfg") && [[ -n $lock ]]; then
+    NOTE[$id]="gesperrt ($lock)"; echo "${Y}gesperrt ($lock) – übersprungen${N}"; continue
+  fi
+
+  status=$(pct status "$id" | awk '{print $2}')
+  if [[ $status != running ]]; then
+    if (( INCLUDE_STOPPED )); then
+      printf '%s(startet) %s' "$D" "$N"
+      if pct start "$id" >/dev/null 2>&1 && wait_ct_ready "$id"; then
+        STARTED[$id]=1
+      else
+        NOTE[$id]="Start fehlgeschlagen"; echo "${R}Start fehlgeschlagen${N}"; continue
+      fi
+    else
+      NOTE[$id]="gestoppt"; echo "${D}gestoppt – übersprungen (Option -s)${N}"; continue
+    fi
+  fi
+
+  read_os "$id" || { NOTE[$id]="os-release nicht lesbar"; echo "${R}os-release nicht lesbar${N}"; continue; }
+  if [[ ${OS[$id]} != debian && ${OS[$id]} != ubuntu ]]; then
+    NOTE[$id]="${OS[$id]} nicht unterstützt"; echo "${Y}${OS[$id]} nicht unterstützt${N}"; continue
+  fi
+
+  # Paket-Updates
+  if ! out=$(ct_run "$id" 'apt-get update -q -o DPkg::Lock::Timeout=120 2>&1'); then
+    NOTE[$id]="apt update fehlgeschlagen"; echo "${R}apt update fehlgeschlagen${N}"
+    grep -E '^(E:|Err:)' <<<"$out" | sed 's/^/      /'
+    continue
+  fi
+  PKG_LIST[$id]=$(ct_run "$id" 'apt-get -s -o Debug::NoLocking=1 full-upgrade 2>/dev/null' \
+                  | awk '/^Inst /{print $2}' | tr '\n' ' ')
+  PKG_CNT[$id]=$(wc -w <<<"${PKG_LIST[$id]}")
+  ct_run "$id" 'dpkg -l proxmox-backup-server 2>/dev/null | grep -q "^ii"' && IS_PBS[$id]=1
+
+  # Neues Release?
+  if [[ ${OS[$id]} == debian ]]; then
+    if ci=$(deb_idx "${CODE[$id]}") && si=$(deb_idx "$DEB_STABLE"); then
+      if (( ci < si )); then
+        nxt=${DEB_ORDER[ci + 1]}
+        REL_CODE[$id]=$nxt
+        REL_TXT[$id]="Debian ${DEB_NUM[$nxt]} ($nxt)"
+        (( ci + 1 < si )) && REL_TXT[$id]+=" ¹"
+      fi
+    else
+      NOTE[$id]="Release '${CODE[$id]}' unbekannt"
+    fi
+  else
+    prompt=$(ct_run "$id" 'sed -n "s/^Prompt=//p" /etc/update-manager/release-upgrades 2>/dev/null' | tr -d '[:space:]')
+    prompt=${prompt:-lts}
+    if [[ $prompt != never ]]; then
+      best='' bestv=''
+      while read -r d v s; do
+        [[ $s == 1 && -n $v ]] || continue
+        mm=$(cut -d. -f1,2 <<<"$v")
+        if ver_gt "$mm" "${VER[$id]}" && { [[ -z $bestv ]] || ver_gt "$bestv" "$mm"; }; then best=$d bestv=$mm; fi
+      done < <(ubuntu_meta "$([[ $prompt == normal ]] && echo normal || echo lts)")
+      [[ -n $best ]] && { REL_CODE[$id]=$best; REL_TXT[$id]="Ubuntu $bestv ($best)"; }
+    fi
+  fi
+
+  if in_list "$id" "$RELEASE_EXCLUDE" && [[ -n ${REL_CODE[$id]:-} ]]; then
+    REL_TXT[$id]+=" (ausgeschl.)"
+  fi
+  printf '%s – %s Paket(e)%s\n' "${VERTXT[$id]}" "${PKG_CNT[$id]}" "${REL_TXT[$id]:+, Release: ${REL_TXT[$id]}}"
+done
+
+# ----------------------------- Übersicht -------------------------------------
+info "Übersicht"
+printf '%s  %-5s %-22s %-26s %-8s %s%s\n' "$B" CT Name "Installiert" Pakete "Neues Release" "$N"
+printf '  %s\n' "$(printf '─%.0s' {1..92})"
+PKG_IDS=() REL_IDS=()
+for id in "${CTS[@]}"; do
+  if [[ -n ${NOTE[$id]:-} && -z ${VERTXT[$id]:-} ]] || [[ -z ${PKG_CNT[$id]:-} ]]; then
+    printf '  %-5s %-22s %s%s%s\n' "$id" "${NAME[$id]}" "$D" "${NOTE[$id]:-–}" "$N"; continue
+  fi
+  pc=${PKG_CNT[$id]}
+  (( pc > 0 )) && { PKG_IDS+=("$id"); pcs="$Y$(printf '%-8s' "$pc")$N"; } || pcs="$G$(printf '%-8s' 0)$N"
+  if [[ -n ${REL_CODE[$id]:-} ]]; then
+    in_list "$id" "$RELEASE_EXCLUDE" || REL_IDS+=("$id")
+    rs="$C${REL_TXT[$id]}$N"
+  else
+    rs="${G}aktuell$N"
+  fi
+  printf '  %-5s %-22s %-26s %s %s\n' "$id" "${NAME[$id]}" "${VERTXT[$id]}" "$pcs" "$rs"
+done
+for id in "${CTS[@]}"; do
+  [[ ${REL_TXT[$id]:-} == *¹* ]] && { echo "  ¹ Mehrere Release-Sprünge nötig – das Skript macht je Lauf eine Stufe, danach erneut starten."; break; }
+done
+
+if ((${#PKG_IDS[@]})); then
+  echo; echo "  ${B}Verfügbare Paket-Updates:${N}"
+  for id in "${PKG_IDS[@]}"; do
+    list=${PKG_LIST[$id]}
+    (( ${#list} > 160 )) && list="${list:0:160}…"
+    printf '  %s%-5s%s %s\n' "$B" "$id" "$N" "$list"
+  done
+fi
+
+if (( CHECK_ONLY )); then
+  echo; ok "Nur geprüft (--check) – nichts installiert."
+  exit 0
+fi
+if ((${#PKG_IDS[@]} == 0 && ${#REL_IDS[@]} == 0)); then
+  echo; ok "Alle geprüften Container sind aktuell."
+  exit 0
+fi
+
+# ----------------------------- Paket-Updates ---------------------------------
+if ((${#PKG_IDS[@]})); then
+  info "Paket-Updates"
+  read -r -p "  Paket-Updates in ${#PKG_IDS[@]} Container(n) installieren? [j]a alle / [a]uswählen / [N]ein: " a </dev/tty
+  SEL=()
+  case $a in
+    j|J|y|Y) SEL=("${PKG_IDS[@]}") ;;
+    a|A)
+      read -r -p "  CT-IDs (z. B. 102,110): " pick </dev/tty
+      pick=$(norm_list "$pick")
+      for id in "${PKG_IDS[@]}"; do in_list "$id" "$pick" && SEL+=("$id"); done ;;
+  esac
+
+  for id in "${SEL[@]}"; do
+    echo; printf '%s── CT %s %s: %s Paket(e) ──%s\n' "$B" "$id" "${NAME[$id]}" "${PKG_CNT[$id]}" "$N"
+    pre_check "$id"
+    ct_script "$id" <<<"$PKG_SCRIPT"; rc=$?
+    if (( rc == 0 )); then
+      RESULT[$id]="${G}Pakete aktualisiert (${PKG_CNT[$id]})${N}"; ok "CT $id aktualisiert"
+    else
+      RESULT[$id]="${R}Paket-Update fehlgeschlagen (Code $rc)${N}"; err "CT $id: Fehler (Code $rc) – siehe Log"
+    fi
+    post_check "$id"
+    RESULT[$id]+=$SVC_NOTE
+  done
+  (( ${#SEL[@]} )) || warn "Keine Paket-Updates ausgewählt."
+fi
+
+# ----------------------------- Release-Upgrades ------------------------------
+if ((${#REL_IDS[@]})); then
+  info "Release-Upgrades"
+  warn "Ein Release-Upgrade lässt sich nicht einfach rückgängig machen. Es wird KEIN Backup erstellt."
+  for id in "${REL_IDS[@]}"; do
+    echo
+    printf '%s── CT %s %s: %s → %s ──%s\n' "$B" "$id" "${NAME[$id]}" "${VERTXT[$id]}" "${REL_TXT[$id]}" "$N"
+    lb=$(last_backup "$id")
+    [[ -n $lb ]] && echo "  Letztes Backup: $lb" || warn "Kein Backup dieses Containers gefunden."
+    [[ -n ${STARTED[$id]:-} ]] && echo "  (Container war gestoppt und wurde für das Update gestartet)"
+
+    if [[ -n ${IS_PBS[$id]:-} ]]; then
+      warn "Dies ist der Proxmox Backup Server – das Release-Upgrade ist zugleich ein PBS-Major-Upgrade."
+      warn "Vorher die offizielle Upgrade-Anleitung lesen und sicherstellen, dass gerade kein Backup läuft."
+      if ct_run "$id" 'command -v pbs3to4 >/dev/null'; then
+        echo "  Prüfprogramm pbs3to4 --full:"; ct_run "$id" 'pbs3to4 --full' | sed 's/^/    /'
+      fi
+      read -r -p "  Zum Fortfahren 'JA' eingeben: " a </dev/tty
+      [[ $a == JA ]] || { RESULT[$id]+="${RESULT[$id]:+, }${D}Release übersprungen${N}"; continue; }
+    else
+      ask "Release-Upgrade für CT $id jetzt durchführen?" \
+        || { RESULT[$id]+="${RESULT[$id]:+, }${D}Release übersprungen${N}"; continue; }
+    fi
+
+    old=${CODE[$id]} new=${REL_CODE[$id]}
+    pre_check "$id"
+    if [[ ${OS[$id]} == debian ]]; then
+      ct_script "$id" "$old" "$new" <<<"$DEB_REL_SCRIPT"; rc=$?
+    else
+      ct_script "$id" <<<"$UBU_REL_SCRIPT"; rc=$?
+    fi
+
+    case $rc in
+      0) ;;
+      10|11|12) err "Vorbereitung fehlgeschlagen (Code $rc) – nichts am Release geändert."
+                RESULT[$id]+="${RESULT[$id]:+, }${R}Release: Vorbereitung fehlgeschlagen${N}"; continue ;;
+      20) err "Eine Paketquelle unterstützt $new noch nicht – Quellen zurückgesetzt, nichts geändert."
+          RESULT[$id]+="${RESULT[$id]:+, }${Y}Release: Quelle ohne $new, zurückgesetzt${N}"; continue ;;
+      *)  err "Upgrade abgebrochen (Code $rc) – Container ist evtl. halb aktualisiert!"
+          err "Manuell prüfen: pct enter $id  →  dpkg --configure -a && apt-get -f install && apt full-upgrade"
+          RESULT[$id]+="${RESULT[$id]:+, }${R}Release FEHLER – manuell prüfen${N}"; continue ;;
+    esac
+
+    echo "  Container wird neu gestartet …"
+    pct reboot "$id" >/dev/null 2>&1 || { pct shutdown "$id" --timeout 90 >/dev/null 2>&1; pct start "$id" >/dev/null 2>&1; }
+    if ! wait_ct_ready "$id"; then
+      err "CT $id ist nach dem Neustart nicht bereit – bitte prüfen."
+      RESULT[$id]+="${RESULT[$id]:+, }${R}Release installiert, Start-Problem${N}"; continue
+    fi
+    before=${VERTXT[$id]}
+    read_os "$id"
+    ok "CT $id läuft: $before → ${VERTXT[$id]}"
+    post_check "$id"
+    if [[ ${OS[$id]} == ubuntu ]]; then
+      dis=$(ct_run "$id" 'grep -rlE "disabled on upgrade|^Enabled: no" /etc/apt/sources.list.d 2>/dev/null' | tr '\n' ' ')
+      [[ -n $dis ]] && warn "Von do-release-upgrade deaktivierte Fremdquellen (z. B. Docker) wieder aktivieren: $dis"
+    fi
+    RESULT[$id]+="${RESULT[$id]:+, }${G}Release → ${VERTXT[$id]}${N}${SVC_NOTE}"
+    [[ ${CODE[$id]} != "$new" ]] && warn "Codename ist '${CODE[$id]}', erwartet '$new' – bitte prüfen."
+  done
+fi
+
+# ----------------------------- Zusammenfassung -------------------------------
+info "Zusammenfassung"
+for id in "${CTS[@]}"; do
+  printf '  %-5s %-22s %s\n' "$id" "${NAME[$id]}" "${RESULT[$id]:-${D}keine Änderung${N}}"
+done
+echo; printf '%sLog: %s%s\n' "$D" "$LOG" "$N"

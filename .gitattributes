@@ -1,0 +1,4 @@
+# Shell-Skripte immer mit Linux-Zeilenenden (LF) speichern –
+# sonst bricht das Skript auf dem Proxmox-Host mit "bash\r" ab.
+* text=auto eol=lf
+Release-Upgrade text eol=lf
