@@ -1,9 +1,13 @@
 # Changelog
 
 Alle wichtigen Änderungen an Release-Upgrade. Neueste Version oben.
-Versionsschema: MAJOR.MINOR.PATCH. PATCH steht für Fehlerbehebungen, MINOR für neue Funktionen, MAJOR für größere Umbauten.
+Versionsschema: VERSION.MAJOR.MINOR (z. B. 1.3.0).
 
-## 1.0.0 – 2026-11-14
+- **VERSION:** wird nur erhöht, wenn der Autor das ausdrücklich entscheidet.
+- **MAJOR:** wird bei jeder Änderung um 1 erhöht, außer es handelt sich um einen Hotfix.
+- **MINOR:** wird bei Hot- und Bugfixes um 1 erhöht.
+
+## 1.3.0 – 2026-11-14
 
 Erste veröffentlichte Version.
 

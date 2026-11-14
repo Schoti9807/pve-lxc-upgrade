@@ -5,13 +5,13 @@
 Alle Einstellungen setzt du in einem grafischen Menü (whiptail). Erst wenn du dort **Starten** wählst, passiert etwas.
 
 ```
-┌──────────── Release-Upgrade 1.0.0 – proxmox ─────────────┐
+┌──────────── Release-Upgrade 1.3.0 – proxmox ─────────────┐
 │ 1  Modus ................... prüfen + aktualisieren      │
 │ 2  Nur diese Container ..... alle                        │
 │ 3  Container auslassen ..... keine                       │
 │ 4  Kein Release-Upgrade .... keine                       │
 │ 5  Gestoppte einbeziehen ... nein                        │
-│ U  Skript aktualisieren (installiert: 1.0.0)             │
+│ U  Skript aktualisieren (installiert: 1.3.0)             │
 │ H  Hilfe zu den Einstellungen                            │
 │ S  >>> Starten <<<                                       │
 │          <Auswählen>              <Abbrechen>            │
